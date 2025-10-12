@@ -107,6 +107,7 @@ func initialModel() model {
 		tuiOutput:    []string{},
 		runningTUI:   "",
 		tuiCmd:       nil,
+		tuiMutex:     &sync.Mutex{},
 		scrollOffset: 0,
 		stopTUIChan:  make(chan bool, 1),
 	}
