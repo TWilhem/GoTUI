@@ -84,7 +84,7 @@ type model struct {
 	tuiOutput    []string     // Sortie du TUI en cours d'exécution
 	runningTUI   string       // Nom du fichier TUI en cours d'exécution
 	tuiCmd       *exec.Cmd    // Commande en cours d'exécution
-	tuiMutex     sync.Mutex   // Mutex pour l'accès concurrent
+	tuiMutex     *sync.Mutex  // Mutex pour l'accès concurrent
 	scrollOffset int          // Offset pour le scroll du contenu
 	stopTUIChan  chan bool    // Canal pour arrêter le TUI
 }
@@ -101,7 +101,7 @@ func initialModel() model {
 		cursor:       0,
 		localFiles:   make(map[string]bool),
 		selected:     make(map[int]bool),
-		cmdTemplate:  "↑/↓: Navigation | Tab: Changer panel | Espace: Sélectionner | Enter: Exécuter TUI | d: Télécharger/Supprimer | c: Annuler | s: Arrêter TUI | q: Quitter",
+		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Execution: e | Validation: Enter | Annuler: c | Stop: s | Quitter: q",
 		activePanel:  0,
 		logs:         []string{},
 		tuiOutput:    []string{},
@@ -345,7 +345,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.selected[m.cursor] = true
 				}
-			case "enter":
+			case "e":
 				// Exécuter le TUI du fichier sélectionné
 				file := m.files[m.cursor]
 				if m.localFiles[file.Name] {
@@ -364,7 +364,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
 				}
-			case "d":
+			case "enter":
 				// Télécharger/Supprimer les fichiers sélectionnés avec 'd'
 				if len(m.selected) > 0 {
 					m.processing = true
@@ -581,7 +581,7 @@ func (m model) View() string {
 	if len(m.logs) == 0 {
 		bottomContent.WriteString("Aucun log pour le moment...")
 	} else {
-		maxLogs := bottomHeight - 4
+		maxLogs := bottomHeight - 5
 		if maxLogs < 1 {
 			maxLogs = 1
 		}
