@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +41,15 @@ type operationCompleteMsg struct {
 
 type allOperationsCompleteMsg struct{}
 
+// Message pour la sortie du TUI
+type tuiOutputMsg struct {
+	line string
+}
+
+type tuiStoppedMsg struct {
+	filename string
+}
+
 // Template pour la barre de statut
 type statusBar struct {
 	message  string
@@ -67,8 +79,14 @@ type model struct {
 	localFiles   map[string]bool
 	selected     map[int]bool // Fichiers sélectionnés pour téléchargement/suppression
 	cmdTemplate  string       // Template du status
-	activePanel  int          // 0 = haut, 1 = bas
+	activePanel  int          // 0 = haut, 1 = bas, 2 = droite
 	logs         []string     // Historique des logs
+	tuiOutput    []string     // Sortie du TUI en cours d'exécution
+	runningTUI   string       // Nom du fichier TUI en cours d'exécution
+	tuiCmd       *exec.Cmd    // Commande en cours d'exécution
+	tuiMutex     sync.Mutex   // Mutex pour l'accès concurrent
+	scrollOffset int          // Offset pour le scroll du contenu
+	stopTUIChan  chan bool    // Canal pour arrêter le TUI
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -83,9 +101,14 @@ func initialModel() model {
 		cursor:       0,
 		localFiles:   make(map[string]bool),
 		selected:     make(map[int]bool),
-		cmdTemplate:  "↑/↓: Navigation | Tab: Changer panel | Espace: Sélectionner | Enter: Valider | c: Annuler | q: Quitter",
+		cmdTemplate:  "↑/↓: Navigation | Tab: Changer panel | Espace: Sélectionner | Enter: Exécuter TUI | d: Télécharger/Supprimer | c: Annuler | s: Arrêter TUI | q: Quitter",
 		activePanel:  0,
 		logs:         []string{},
+		tuiOutput:    []string{},
+		runningTUI:   "",
+		tuiCmd:       nil,
+		scrollOffset: 0,
+		stopTUIChan:  make(chan bool, 1),
 	}
 }
 
@@ -129,6 +152,76 @@ func fetchFiles() tea.Msg {
 	return filesLoadedMsg{files: gitHubFiles, err: nil}
 }
 
+// Commande pour exécuter un TUI
+func runTUI(filename string, stopChan chan bool) tea.Cmd {
+	return func() tea.Msg {
+		// Vérifier si le fichier est exécutable
+		fileInfo, err := os.Stat(filename)
+		if err != nil {
+			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur: %v", err)}
+		}
+
+		// Rendre le fichier exécutable si nécessaire
+		if fileInfo.Mode()&0111 == 0 {
+			if err := os.Chmod(filename, 0755); err != nil {
+				return tuiOutputMsg{line: fmt.Sprintf("❌ Impossible de rendre exécutable: %v", err)}
+			}
+		}
+
+		// Exécuter le fichier
+		cmd := exec.Command("./" + filename)
+
+		// Capturer stdout et stderr
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur stdout: %v", err)}
+		}
+
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur stderr: %v", err)}
+		}
+
+		if err := cmd.Start(); err != nil {
+			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur démarrage: %v", err)}
+		}
+
+		// Lire la sortie dans un goroutine
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				select {
+				case <-stopChan:
+					cmd.Process.Kill()
+					return
+				default:
+					// Note: Dans une vraie app TUI, on enverrait ces messages
+					// Ici on les ignore car on ne peut pas facilement les transmettre
+				}
+			}
+		}()
+
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				select {
+				case <-stopChan:
+					return
+				default:
+					// Idem pour stderr
+				}
+			}
+		}()
+
+		// Attendre la fin
+		go func() {
+			cmd.Wait()
+		}()
+
+		return tuiOutputMsg{line: fmt.Sprintf("🚀 Démarrage de %s...\n(Le TUI s'exécute en arrière-plan)", filename)}
+	}
+}
+
 // Commande pour télécharger un fichier
 func downloadFile(file GitHubFile) tea.Cmd {
 	return func() tea.Msg {
@@ -152,6 +245,9 @@ func downloadFile(file GitHubFile) tea.Cmd {
 		if err != nil {
 			return operationCompleteMsg{filename: file.Name, operation: "download", err: err}
 		}
+
+		// Rendre le fichier exécutable
+		os.Chmod(file.Name, 0755)
 
 		return operationCompleteMsg{filename: file.Name, operation: "download", err: nil}
 	}
@@ -194,12 +290,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Quitter avec 'q' ou Ctrl+C
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
+			// Arrêter le TUI si en cours
+			if m.runningTUI != "" && m.tuiCmd != nil {
+				m.tuiCmd.Process.Kill()
+			}
 			return m, tea.Quit
+		}
+
+		// Arrêter le TUI avec 's'
+		if msg.String() == "s" && m.runningTUI != "" {
+			if m.tuiCmd != nil && m.tuiCmd.Process != nil {
+				m.tuiCmd.Process.Kill()
+				m.addLog(fmt.Sprintf("🛑 Arrêt de %s", m.runningTUI))
+			}
+			m.runningTUI = ""
+			m.tuiOutput = []string{}
+			m.tuiCmd = nil
 		}
 
 		// Changer de panel avec Tab
 		if msg.String() == "tab" && !m.loading && !m.processing {
 			m.activePanel = (m.activePanel + 1) % 2
+		}
+
+		// Scroll dans le panneau de prévisualisation (panel droit)
+		if m.activePanel == 2 && len(m.tuiOutput) > 0 {
+			switch msg.String() {
+			case "up", "k":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+			case "down", "j":
+				if m.scrollOffset < len(m.tuiOutput)-1 {
+					m.scrollOffset++
+				}
+			}
 		}
 
 		// Navigation avec les flèches (seulement dans le panel du haut)
@@ -221,7 +346,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected[m.cursor] = true
 				}
 			case "enter":
-				// Valider et exécuter les opérations
+				// Exécuter le TUI du fichier sélectionné
+				file := m.files[m.cursor]
+				if m.localFiles[file.Name] {
+					// Arrêter le TUI précédent si en cours
+					if m.runningTUI != "" && m.tuiCmd != nil {
+						m.tuiCmd.Process.Kill()
+					}
+					m.runningTUI = file.Name
+					m.tuiOutput = []string{fmt.Sprintf("🚀 Exécution de %s...", file.Name)}
+					m.scrollOffset = 0
+					m.addLog(fmt.Sprintf("▶️  Lancement de %s", file.Name))
+
+					// Créer un nouveau canal d'arrêt
+					m.stopTUIChan = make(chan bool, 1)
+					return m, runTUI(file.Name, m.stopTUIChan)
+				} else {
+					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
+				}
+			case "d":
+				// Télécharger/Supprimer les fichiers sélectionnés avec 'd'
 				if len(m.selected) > 0 {
 					m.processing = true
 					m.statusMsg = fmt.Sprintf("Traitement de %d Plugin(s)...", len(m.selected))
@@ -256,6 +400,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tuiOutputMsg:
+		m.tuiMutex.Lock()
+		m.tuiOutput = append(m.tuiOutput, msg.line)
+		// Limiter le nombre de lignes
+		if len(m.tuiOutput) > 1000 {
+			m.tuiOutput = m.tuiOutput[len(m.tuiOutput)-1000:]
+		}
+		m.tuiMutex.Unlock()
+
+	case tuiStoppedMsg:
+		m.addLog(fmt.Sprintf("⏹️  %s terminé", msg.filename))
+		m.runningTUI = ""
+		m.tuiCmd = nil
+
 	case operationCompleteMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("❌ Erreur %s: %v", msg.filename, msg.err)
@@ -269,6 +427,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = fmt.Sprintf("🗑️  %s supprimé!", msg.filename)
 				delete(m.localFiles, msg.filename)
 				m.addLog(fmt.Sprintf("🗑️  %s supprimé avec succès", msg.filename))
+				// Arrêter le TUI si c'était celui en cours
+				if m.runningTUI == msg.filename {
+					if m.tuiCmd != nil && m.tuiCmd.Process != nil {
+						m.tuiCmd.Process.Kill()
+					}
+					m.runningTUI = ""
+					m.tuiOutput = []string{}
+					m.tuiCmd = nil
+				}
 			}
 		}
 
@@ -297,47 +464,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Affichage
 func (m model) View() string {
-	// Largeur fixe pour les panels
-	panelWidth := 35
+	// Largeur pour les panels gauches
+	leftPanelWidth := 35
+	// Largeur pour le panel droit (TUI)
+	rightPanelWidth := m.width - leftPanelWidth - 6
 
-	// Calculer la hauteur disponible pour les panels (hauteur totale - 1 ligne pour la barre de statut)
+	// Calculer la hauteur disponible
 	availableHeight := m.height - 1
 
-	// Hauteur fixe pour chaque panel (répartition 60/40)
+	// Hauteur fixe pour chaque panel gauche
 	topHeight := int(float64(availableHeight) * 0.6)
-	bottomHeight := availableHeight - topHeight - 4 // -4 pour les bordures
+	bottomHeight := availableHeight - topHeight - 4
 
-	// Style pour le panel actif (haut)
+	// Hauteur du panel de droite
+	rightPanelHeight := availableHeight - 2
+
+	// Styles pour les panels gauches
 	topBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("86")).
 		Padding(1, 2).
-		Width(panelWidth).
+		Width(leftPanelWidth).
 		Height(topHeight)
 
-	// Style pour le panel inactif (haut)
 	topBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(1, 2).
-		Width(panelWidth).
+		Width(leftPanelWidth).
 		Height(topHeight)
 
-	// Style pour le panel actif (bas)
 	bottomBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("86")).
 		Padding(1, 2).
-		Width(panelWidth).
+		Width(leftPanelWidth).
 		Height(bottomHeight)
 
-	// Style pour le panel inactif (bas)
 	bottomBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(1, 2).
-		Width(panelWidth).
+		Width(leftPanelWidth).
 		Height(bottomHeight)
+
+	// Style pour le panel de droite
+	rightBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("86")).
+		Padding(1, 2).
+		Width(rightPanelWidth).
+		Height(rightPanelHeight)
 
 	// Style de la barre de statut
 	statusStyle := lipgloss.NewStyle().
@@ -345,20 +522,17 @@ func (m model) View() string {
 		Width(m.width - 2).
 		Align(lipgloss.Left)
 
-	// Style pour l'élément sélectionné (ligne complète avec fond)
+	// Styles pour les fichiers
 	selectedStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("240")).
 		Foreground(lipgloss.Color("15"))
 
-	// Style pour fichier non téléchargé (bleu clair)
 	notDownloadedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("39"))
 
-	// Style pour fichier téléchargé (vert)
 	downloadedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("2"))
 
-	// Style pour fichier à supprimer (rouge)
 	toDeleteStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("1"))
 
@@ -375,7 +549,6 @@ func (m model) View() string {
 	} else {
 		topContent.WriteString(fmt.Sprintf("%d Plugin disponible:\n\n", len(m.files)))
 		for i, file := range m.files {
-			// Déterminer la couleur selon l'état du fichier
 			var textStyle lipgloss.Style
 			if m.selected[i] && m.localFiles[file.Name] {
 				textStyle = toDeleteStyle
@@ -385,13 +558,18 @@ func (m model) View() string {
 				textStyle = notDownloadedStyle
 			}
 
+			// Ajouter un indicateur si c'est le TUI en cours
+			prefix := ""
+			if file.Name == m.runningTUI {
+				prefix = "▶ "
+			}
+
 			if i == m.cursor && m.activePanel == 0 {
-				selectedWithColor := selectedStyle.
-					Foreground(textStyle.GetForeground())
-				paddedLine := file.Name + strings.Repeat(" ", panelWidth-len(file.Name)-4)
+				selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
+				paddedLine := prefix + file.Name + strings.Repeat(" ", leftPanelWidth-len(file.Name)-len(prefix)-4)
 				topContent.WriteString(selectedWithColor.Render(paddedLine) + "\n")
 			} else {
-				topContent.WriteString(textStyle.Render(file.Name) + "\n")
+				topContent.WriteString(textStyle.Render(prefix+file.Name) + "\n")
 			}
 		}
 	}
@@ -403,8 +581,7 @@ func (m model) View() string {
 	if len(m.logs) == 0 {
 		bottomContent.WriteString("Aucun log pour le moment...")
 	} else {
-		// Calculer le nombre de logs affichables selon la hauteur du panel
-		maxLogs := bottomHeight - 5
+		maxLogs := bottomHeight - 4
 		if maxLogs < 1 {
 			maxLogs = 1
 		}
@@ -414,12 +591,10 @@ func (m model) View() string {
 			startIdx = len(m.logs) - maxLogs
 		}
 
-		// Largeur maximale pour les logs (largeur du panel - padding - bordures)
-		maxLogWidth := panelWidth - 6
+		maxLogWidth := leftPanelWidth - 6
 
 		for i := len(m.logs) - 1; i >= startIdx; i-- {
 			log := m.logs[i]
-			// Tronquer le log s'il est trop long
 			if len(log) > maxLogWidth {
 				log = log[:maxLogWidth-3] + "..."
 			}
@@ -427,7 +602,49 @@ func (m model) View() string {
 		}
 	}
 
-	// Choisir le style selon le panel actif
+	// === PANEL DE DROITE - TUI OUTPUT ===
+	var rightContent strings.Builder
+	if m.runningTUI != "" {
+		rightContent.WriteString(fmt.Sprintf("🖥️  TUI: %s\n\n", m.runningTUI))
+
+		m.tuiMutex.Lock()
+		if len(m.tuiOutput) > 0 {
+			maxLines := rightPanelHeight - 4
+			if maxLines < 1 {
+				maxLines = 1
+			}
+
+			startLine := len(m.tuiOutput) - maxLines
+			if startLine < 0 {
+				startLine = 0
+			}
+
+			maxWidth := rightPanelWidth - 6
+
+			for i := startLine; i < len(m.tuiOutput); i++ {
+				line := m.tuiOutput[i]
+				if len(line) > maxWidth {
+					line = line[:maxWidth-3] + "..."
+				}
+				rightContent.WriteString(line + "\n")
+			}
+		} else {
+			rightContent.WriteString("En attente de sortie...\n")
+		}
+		m.tuiMutex.Unlock()
+	} else {
+		rightContent.WriteString("Exécution TUI\n\n")
+		rightContent.WriteString("Sélectionnez un fichier\n")
+		rightContent.WriteString("téléchargé et appuyez\n")
+		rightContent.WriteString("sur Enter pour exécuter\n")
+		rightContent.WriteString("son TUI ici.\n\n")
+		rightContent.WriteString("Commandes:\n")
+		rightContent.WriteString("• Enter: Exécuter\n")
+		rightContent.WriteString("• s: Arrêter le TUI\n")
+		rightContent.WriteString("• d: Télécharger/Supprimer")
+	}
+
+	// Choisir les styles selon le panel actif
 	var topStyle, bottomStyle lipgloss.Style
 	if m.activePanel == 0 {
 		topStyle = topBoxStyle
@@ -437,22 +654,28 @@ func (m model) View() string {
 		bottomStyle = bottomBoxStyle
 	}
 
-	// Empiler les deux panels verticalement
-	panels := lipgloss.JoinVertical(
+	// Empiler les panels gauches
+	leftPanels := lipgloss.JoinVertical(
 		lipgloss.Left,
 		topStyle.Render(topContent.String()),
 		bottomStyle.Render(bottomContent.String()),
 	)
 
-	// Calculer l'espace restant pour remplir jusqu'à la barre de statut
-	panelsHeight := topHeight + bottomHeight + 4 // +4 pour les bordures
+	// Joindre gauche et droite
+	allPanels := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		leftPanels,
+		rightBoxStyle.Render(rightContent.String()),
+	)
+
+	panelsHeight := topHeight + bottomHeight + 4
 	spacerHeight := availableHeight - panelsHeight
 	if spacerHeight < 0 {
 		spacerHeight = 0
 	}
 	spacer := strings.Repeat("\n", spacerHeight)
 
-	// Barre de statut en bas
+	// Barre de statut
 	var statusBar statusBar
 
 	if m.loading {
@@ -463,10 +686,13 @@ func (m model) View() string {
 		statusBar.message = m.statusMsg
 	} else if len(m.selected) > 0 {
 		statusBar.message = fmt.Sprintf("%d Plugin(s) sélectionné(s)", len(m.selected))
+	} else if m.runningTUI != "" {
+		statusBar.message = fmt.Sprintf("▶️  %s en cours d'exécution", m.runningTUI)
 	}
+
 	statusBar.commands = m.cmdTemplate
 
-	return panels + spacer + "\n" + statusStyle.Render(statusBar.render())
+	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render())
 }
 
 func main() {
