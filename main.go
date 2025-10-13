@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -41,13 +39,9 @@ type operationCompleteMsg struct {
 
 type allOperationsCompleteMsg struct{}
 
-// Message pour la sortie du TUI
-type tuiOutputMsg struct {
-	line string
-}
-
-type tuiStoppedMsg struct {
-	filename string
+// Contenu du TUI Imbriqué
+type embeddedTUIMsg struct {
+	content string
 }
 
 // Template pour la barre de statut
@@ -83,10 +77,9 @@ type model struct {
 	logs         []string     // Historique des logs
 	tuiOutput    []string     // Sortie du TUI en cours d'exécution
 	runningTUI   string       // Nom du fichier TUI en cours d'exécution
-	tuiCmd       *exec.Cmd    // Commande en cours d'exécution
-	tuiMutex     *sync.Mutex  // Mutex pour l'accès concurrent
-	scrollOffset int          // Offset pour le scroll du contenu
-	stopTUIChan  chan bool    // Canal pour arrêter le TUI
+	embeddedTUI  tea.Model
+	tuiMutex     *sync.Mutex // Mutex pour l'accès concurrent
+	scrollOffset int         // Offset pour le scroll du contenu
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -106,10 +99,9 @@ func initialModel() model {
 		logs:         []string{},
 		tuiOutput:    []string{},
 		runningTUI:   "",
-		tuiCmd:       nil,
+		embeddedTUI:  nil,
 		tuiMutex:     &sync.Mutex{},
 		scrollOffset: 0,
-		stopTUIChan:  make(chan bool, 1),
 	}
 }
 
@@ -151,76 +143,6 @@ func fetchFiles() tea.Msg {
 	}
 
 	return filesLoadedMsg{files: gitHubFiles, err: nil}
-}
-
-// Commande pour exécuter un TUI
-func runTUI(filename string, stopChan chan bool) tea.Cmd {
-	return func() tea.Msg {
-		// Vérifier si le fichier est exécutable
-		fileInfo, err := os.Stat(filename)
-		if err != nil {
-			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur: %v", err)}
-		}
-
-		// Rendre le fichier exécutable si nécessaire
-		if fileInfo.Mode()&0111 == 0 {
-			if err := os.Chmod(filename, 0755); err != nil {
-				return tuiOutputMsg{line: fmt.Sprintf("❌ Impossible de rendre exécutable: %v", err)}
-			}
-		}
-
-		// Exécuter le fichier
-		cmd := exec.Command("./" + filename)
-
-		// Capturer stdout et stderr
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur stdout: %v", err)}
-		}
-
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur stderr: %v", err)}
-		}
-
-		if err := cmd.Start(); err != nil {
-			return tuiOutputMsg{line: fmt.Sprintf("❌ Erreur démarrage: %v", err)}
-		}
-
-		// Lire la sortie dans un goroutine
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				select {
-				case <-stopChan:
-					cmd.Process.Kill()
-					return
-				default:
-					// Note: Dans une vraie app TUI, on enverrait ces messages
-					// Ici on les ignore car on ne peut pas facilement les transmettre
-				}
-			}
-		}()
-
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				select {
-				case <-stopChan:
-					return
-				default:
-					// Idem pour stderr
-				}
-			}
-		}()
-
-		// Attendre la fin
-		go func() {
-			cmd.Wait()
-		}()
-
-		return tuiOutputMsg{line: fmt.Sprintf("🚀 Démarrage de %s...\n(Le TUI s'exécute en arrière-plan)", filename)}
-	}
 }
 
 // Commande pour télécharger un fichier
@@ -287,44 +209,39 @@ func processSelectedFiles(m model) tea.Cmd {
 
 // Gestion des événements
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	// Si un TUI est en cours, propager certains messages
+	if m.embeddedTUI != nil && m.activePanel == 2 {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			// 's' pour arrêter le TUI
+			if msg.String() == "s" {
+				m.embeddedTUI = nil
+				m.runningTUI = ""
+				m.addLog("🛑 TUI arrêté")
+				m.activePanel = 0
+				return m, nil
+			}
+			// Sinon propager au TUI imbriqué
+			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Quitter avec 'q' ou Ctrl+C
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
-			// Arrêter le TUI si en cours
-			if m.runningTUI != "" && m.tuiCmd != nil {
-				m.tuiCmd.Process.Kill()
-			}
 			return m, tea.Quit
-		}
-
-		// Arrêter le TUI avec 's'
-		if msg.String() == "s" && m.runningTUI != "" {
-			if m.tuiCmd != nil && m.tuiCmd.Process != nil {
-				m.tuiCmd.Process.Kill()
-				m.addLog(fmt.Sprintf("🛑 Arrêt de %s", m.runningTUI))
-			}
-			m.runningTUI = ""
-			m.tuiOutput = []string{}
-			m.tuiCmd = nil
 		}
 
 		// Changer de panel avec Tab
 		if msg.String() == "tab" && !m.loading && !m.processing {
-			m.activePanel = (m.activePanel + 1) % 2
-		}
-
-		// Scroll dans le panneau de prévisualisation (panel droit)
-		if m.activePanel == 2 && len(m.tuiOutput) > 0 {
-			switch msg.String() {
-			case "up", "k":
-				if m.scrollOffset > 0 {
-					m.scrollOffset--
-				}
-			case "down", "j":
-				if m.scrollOffset < len(m.tuiOutput)-1 {
-					m.scrollOffset++
-				}
+			if m.embeddedTUI != nil {
+				m.activePanel = (m.activePanel + 1) % 3
+			} else {
+				m.activePanel = (m.activePanel + 1) % 2
 			}
 		}
 
@@ -350,18 +267,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Exécuter le TUI du fichier sélectionné
 				file := m.files[m.cursor]
 				if m.localFiles[file.Name] {
-					// Arrêter le TUI précédent si en cours
-					if m.runningTUI != "" && m.tuiCmd != nil {
-						m.tuiCmd.Process.Kill()
-					}
 					m.runningTUI = file.Name
-					m.tuiOutput = []string{fmt.Sprintf("🚀 Exécution de %s...", file.Name)}
-					m.scrollOffset = 0
+					m.embeddedTUI = newDemoTUI()
+					m.activePanel = 2
 					m.addLog(fmt.Sprintf("▶️  Lancement de %s", file.Name))
-
-					// Créer un nouveau canal d'arrêt
-					m.stopTUIChan = make(chan bool, 1)
-					return m, runTUI(file.Name, m.stopTUIChan)
+					return m, m.embeddedTUI.Init()
 				} else {
 					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
 				}
@@ -383,6 +293,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Capturer la taille de la fenêtre
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.embeddedTUI != nil {
+			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
+			return m, cmd
+		}
 
 	case filesLoadedMsg:
 		m.loading = false
@@ -401,20 +315,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case tuiOutputMsg:
-		m.tuiMutex.Lock()
-		m.tuiOutput = append(m.tuiOutput, msg.line)
-		// Limiter le nombre de lignes
-		if len(m.tuiOutput) > 1000 {
-			m.tuiOutput = m.tuiOutput[len(m.tuiOutput)-1000:]
-		}
-		m.tuiMutex.Unlock()
-
-	case tuiStoppedMsg:
-		m.addLog(fmt.Sprintf("⏹️  %s terminé", msg.filename))
-		m.runningTUI = ""
-		m.tuiCmd = nil
-
 	case operationCompleteMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("❌ Erreur %s: %v", msg.filename, msg.err)
@@ -430,12 +330,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.addLog(fmt.Sprintf("🗑️  %s supprimé avec succès", msg.filename))
 				// Arrêter le TUI si c'était celui en cours
 				if m.runningTUI == msg.filename {
-					if m.tuiCmd != nil && m.tuiCmd.Process != nil {
-						m.tuiCmd.Process.Kill()
-					}
+					m.embeddedTUI = nil
 					m.runningTUI = ""
-					m.tuiOutput = []string{}
-					m.tuiCmd = nil
 				}
 			}
 		}
@@ -458,6 +354,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Effacer le message de statut
 			m.statusMsg = ""
 		}
+	}
+
+	// Propager les messages au TUI imbriqué
+	if m.embeddedTUI != nil {
+		m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -517,6 +419,14 @@ func (m model) View() string {
 		Width(rightPanelWidth).
 		Height(rightPanelHeight)
 
+	// Style pour le panel de droite
+	rightBoxInactiveStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(1, 2).
+		Width(rightPanelWidth).
+		Height(rightPanelHeight)
+
 	// Style de la barre de statut
 	statusStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("240")).
@@ -559,7 +469,7 @@ func (m model) View() string {
 				textStyle = notDownloadedStyle
 			}
 
-			// Ajouter un indicateur si c'est le TUI en cours
+			// Ajouter un indicateur si c'est le TUI Imbriqué est en cours
 			prefix := ""
 			if file.Name == m.runningTUI {
 				prefix = "▶ "
@@ -605,34 +515,9 @@ func (m model) View() string {
 
 	// === PANEL DE DROITE - TUI OUTPUT ===
 	var rightContent strings.Builder
-	if m.runningTUI != "" {
-		rightContent.WriteString(fmt.Sprintf("🖥️  TUI: %s\n\n", m.runningTUI))
-
-		m.tuiMutex.Lock()
-		if len(m.tuiOutput) > 0 {
-			maxLines := rightPanelHeight - 4
-			if maxLines < 1 {
-				maxLines = 1
-			}
-
-			startLine := len(m.tuiOutput) - maxLines
-			if startLine < 0 {
-				startLine = 0
-			}
-
-			maxWidth := rightPanelWidth - 6
-
-			for i := startLine; i < len(m.tuiOutput); i++ {
-				line := m.tuiOutput[i]
-				if len(line) > maxWidth {
-					line = line[:maxWidth-3] + "..."
-				}
-				rightContent.WriteString(line + "\n")
-			}
-		} else {
-			rightContent.WriteString("En attente de sortie...\n")
-		}
-		m.tuiMutex.Unlock()
+	if m.embeddedTUI != nil {
+		// Afficher le TUI imbriqué
+		rightContent.WriteString(m.embeddedTUI.View())
 	} else {
 		rightContent.WriteString("Exécution TUI\n\n")
 		rightContent.WriteString("Sélectionnez un fichier\n")
@@ -646,13 +531,19 @@ func (m model) View() string {
 	}
 
 	// Choisir les styles selon le panel actif
-	var topStyle, bottomStyle lipgloss.Style
+	var topStyle, bottomStyle, rightStyle lipgloss.Style
 	if m.activePanel == 0 {
 		topStyle = topBoxStyle
 		bottomStyle = bottomBoxInactiveStyle
-	} else {
+		rightStyle = rightBoxInactiveStyle
+	} else if m.activePanel == 1 {
 		topStyle = topBoxInactiveStyle
 		bottomStyle = bottomBoxStyle
+		rightStyle = rightBoxInactiveStyle
+	} else if m.activePanel == 2 {
+		topStyle = topBoxInactiveStyle
+		bottomStyle = bottomBoxInactiveStyle
+		rightStyle = rightBoxStyle
 	}
 
 	// Empiler les panels gauches
@@ -666,7 +557,7 @@ func (m model) View() string {
 	allPanels := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		leftPanels,
-		rightBoxStyle.Render(rightContent.String()),
+		rightStyle.Render(rightContent.String()),
 	)
 
 	panelsHeight := topHeight + bottomHeight + 4
@@ -694,6 +585,45 @@ func (m model) View() string {
 	statusBar.commands = m.cmdTemplate
 
 	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render())
+}
+
+// ===== TUI DÉMONSTRATION SIMPLE =====
+
+type demoTUIModel struct {
+	counter int
+	ticker  time.Time
+}
+
+func newDemoTUI() demoTUIModel {
+	return demoTUIModel{counter: 0}
+}
+
+func (m demoTUIModel) Init() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func (m demoTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tickMsg:
+		m.counter++
+		m.ticker = time.Time(msg)
+		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		})
+	}
+	return m, nil
+}
+
+func (m demoTUIModel) View() string {
+	return fmt.Sprintf("🎮 TUI DEMO\n\n"+
+		"Compteur: %d\n"+
+		"Heure: %s\n\n"+
+		"Ce TUI tourne dans le panel!\n"+
+		"Appuyez sur 's' pour arrêter.",
+		m.counter,
+		time.Now().Format("15:04:05"))
 }
 
 func main() {
