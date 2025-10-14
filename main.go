@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"plugin"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +40,10 @@ type operationCompleteMsg struct {
 
 type allOperationsCompleteMsg struct{}
 
-// Contenu du TUI Imbriqué
-type embeddedTUIMsg struct {
-	content string
+// Message pour le chargement de plugin
+type pluginLoadedMsg struct {
+	model tea.Model
+	err   error
 }
 
 // Template pour la barre de statut
@@ -184,6 +186,33 @@ func deleteFile(filename string) tea.Cmd {
 	}
 }
 
+// Charger un plugin externe
+func loadPlugin(filename string) tea.Cmd {
+	return func() tea.Msg {
+		// Ouvrir le plugin
+		plug, err := plugin.Open(filename)
+		if err != nil {
+			return pluginLoadedMsg{model: nil, err: fmt.Errorf("erreur ouverture plugin: %v", err)}
+		}
+
+		// Chercher le symbole NewTUI
+		symNewTUI, err := plug.Lookup("NewTUI")
+		if err != nil {
+			return pluginLoadedMsg{model: nil, err: fmt.Errorf("symbole NewTUI non trouvé: %v", err)}
+		}
+
+		// Convertir en fonction
+		newTUI, ok := symNewTUI.(func() tea.Model)
+		if !ok {
+			return pluginLoadedMsg{model: nil, err: fmt.Errorf("format de plugin invalide")}
+		}
+
+		// Créer le modèle
+		tuiModel := newTUI()
+		return pluginLoadedMsg{model: tuiModel, err: nil}
+	}
+}
+
 // Traiter toutes les opérations sélectionnées
 func processSelectedFiles(m model) tea.Cmd {
 	var cmds []tea.Cmd
@@ -224,6 +253,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// Sinon propager au TUI imbriqué
+			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
+			return m, cmd
+		case tea.WindowSizeMsg:
+			// Propager le resize au TUI imbriqué
 			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
 			return m, cmd
 		}
@@ -268,15 +301,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				file := m.files[m.cursor]
 				if m.localFiles[file.Name] {
 					m.runningTUI = file.Name
-					m.embeddedTUI = newDemoTUI()
+					m.addLog(fmt.Sprintf("▶️  Chargement de %s...", file.Name))
 					m.activePanel = 2
-					m.addLog(fmt.Sprintf("▶️  Lancement de %s", file.Name))
-					return m, m.embeddedTUI.Init()
+					return m, loadPlugin(file.Name)
 				} else {
 					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
 				}
 			case "enter":
-				// Télécharger/Supprimer les fichiers sélectionnés avec 'd'
+				// Télécharger/Supprimer les fichiers sélectionnés
 				if len(m.selected) > 0 {
 					m.processing = true
 					m.statusMsg = fmt.Sprintf("Traitement de %d Plugin(s)...", len(m.selected))
@@ -293,10 +325,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Capturer la taille de la fenêtre
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.embeddedTUI != nil {
-			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
-			return m, cmd
-		}
 
 	case filesLoadedMsg:
 		m.loading = false
@@ -345,6 +373,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Second*3, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
+
+	case pluginLoadedMsg:
+		if msg.err != nil {
+			m.addLog(fmt.Sprintf("❌ Erreur chargement plugin: %v", msg.err))
+			m.runningTUI = ""
+			m.activePanel = 0
+		} else {
+			m.embeddedTUI = msg.model
+			m.addLog(fmt.Sprintf("✅ Plugin %s chargé avec succès", m.runningTUI))
+			return m, m.embeddedTUI.Init()
+		}
 
 	case tickMsg:
 		if m.loading || m.processing {
@@ -419,7 +458,6 @@ func (m model) View() string {
 		Width(rightPanelWidth).
 		Height(rightPanelHeight)
 
-	// Style pour le panel de droite
 	rightBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
@@ -469,7 +507,7 @@ func (m model) View() string {
 				textStyle = notDownloadedStyle
 			}
 
-			// Ajouter un indicateur si c'est le TUI Imbriqué est en cours
+			// Ajouter un indicateur si c'est le TUI en cours
 			prefix := ""
 			if file.Name == m.runningTUI {
 				prefix = "▶ "
@@ -522,12 +560,12 @@ func (m model) View() string {
 		rightContent.WriteString("Exécution TUI\n\n")
 		rightContent.WriteString("Sélectionnez un fichier\n")
 		rightContent.WriteString("téléchargé et appuyez\n")
-		rightContent.WriteString("sur Enter pour exécuter\n")
+		rightContent.WriteString("sur 'e' pour exécuter\n")
 		rightContent.WriteString("son TUI ici.\n\n")
 		rightContent.WriteString("Commandes:\n")
-		rightContent.WriteString("• Enter: Exécuter\n")
+		rightContent.WriteString("• e: Exécuter\n")
 		rightContent.WriteString("• s: Arrêter le TUI\n")
-		rightContent.WriteString("• d: Télécharger/Supprimer")
+		rightContent.WriteString("• Enter: Télécharger/Supprimer")
 	}
 
 	// Choisir les styles selon le panel actif
@@ -585,45 +623,6 @@ func (m model) View() string {
 	statusBar.commands = m.cmdTemplate
 
 	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render())
-}
-
-// ===== TUI DÉMONSTRATION SIMPLE =====
-
-type demoTUIModel struct {
-	counter int
-	ticker  time.Time
-}
-
-func newDemoTUI() demoTUIModel {
-	return demoTUIModel{counter: 0}
-}
-
-func (m demoTUIModel) Init() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
-
-func (m demoTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tickMsg:
-		m.counter++
-		m.ticker = time.Time(msg)
-		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
-			return tickMsg(t)
-		})
-	}
-	return m, nil
-}
-
-func (m demoTUIModel) View() string {
-	return fmt.Sprintf("🎮 TUI DEMO\n\n"+
-		"Compteur: %d\n"+
-		"Heure: %s\n\n"+
-		"Ce TUI tourne dans le panel!\n"+
-		"Appuyez sur 's' pour arrêter.",
-		m.counter,
-		time.Now().Format("15:04:05"))
 }
 
 func main() {
