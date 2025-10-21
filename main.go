@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"plugin"
 	"strings"
@@ -91,7 +92,14 @@ var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 // Initialisation
 func initialModel() model {
-	pluginDir := "./Plugin"
+	// Récupère le dossier où se trouve le binaire
+	baseDir, err := os.Getwd()
+	if err != nil {
+		fmt.Println("Erreur récupération chemin exécutable:", err)
+		os.Exit(1)
+	}
+	pluginDir := filepath.Join(baseDir, "Plugin")
+
 	// Créer le dossier s'il n'existe pas
 	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 		os.Mkdir(pluginDir, 0755)
@@ -249,6 +257,51 @@ func processSelectedFiles(m model) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// Ajoute un alias dans ~/.Plugin/.pluginbashrc
+func addAliasToPluginBashrc(filename, pluginDir string) error {
+	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
+
+	aliasLine := fmt.Sprintf("alias %s='%s/%s'\n", strings.TrimSuffix(filename, filepath.Ext(filename)), pluginDir, filename)
+
+	// Lire le contenu existant
+	content, _ := os.ReadFile(pluginFile)
+	if strings.Contains(string(content), aliasLine) {
+		return nil // alias déjà présent
+	}
+
+	// Ajouter la ligne
+	f, err := os.OpenFile(pluginFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(aliasLine)
+	return err
+}
+
+// Supprime l’alias correspondant à un fichier
+func removeAliasFromPluginBashrc(filename, pluginDir string) error {
+	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
+
+	aliasPrefix := fmt.Sprintf("alias %s='%s/%s'", strings.TrimSuffix(filename, filepath.Ext(filename)), pluginDir, filename)
+
+	content, err := os.ReadFile(pluginFile)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var newLines []string
+	for _, line := range lines {
+		if !strings.HasPrefix(line, aliasPrefix) {
+			newLines = append(newLines, line)
+		}
+	}
+
+	return os.WriteFile(pluginFile, []byte(strings.Join(newLines, "\n")), 0644)
+}
+
 // Gestion des événements
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -284,6 +337,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Quitter avec 'q' ou Ctrl+C
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
+			fmt.Println("🔄  Veuillez exécuter : source ~/.bashrc pour recharger vos alias.")
 			return m, tea.Quit
 		}
 
@@ -371,10 +425,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = fmt.Sprintf("✅ %s téléchargé!", msg.filename)
 				m.localFiles[msg.filename] = true
 				m.addLog(fmt.Sprintf("⬇️  %s téléchargé avec succès", msg.filename))
+				// ✅ Ajouter l'alias automatiquement
+				if err := addAliasToPluginBashrc(msg.filename, m.pluginDir); err != nil {
+					m.addLog(fmt.Sprintf("⚠️  Impossible d'ajouter l'alias pour %s: %v", msg.filename, err))
+				} else {
+					m.addLog(fmt.Sprintf("🔗 Alias ajouté pour %s", msg.filename))
+				}
 			} else {
 				m.statusMsg = fmt.Sprintf("🗑️  %s supprimé!", msg.filename)
 				delete(m.localFiles, msg.filename)
 				m.addLog(fmt.Sprintf("🗑️  %s supprimé avec succès", msg.filename))
+				// ✅ Supprimer l'alias automatiquement
+				if err := removeAliasFromPluginBashrc(msg.filename, m.pluginDir); err != nil {
+					m.addLog(fmt.Sprintf("⚠️  Impossible de retirer l'alias pour %s: %v", msg.filename, err))
+				} else {
+					m.addLog(fmt.Sprintf("🔗 Alias supprimé pour %s", msg.filename))
+				}
 				// Arrêter le TUI si c'était celui en cours
 				if m.runningTUI == msg.filename {
 					m.embeddedTUI = nil
@@ -645,6 +711,102 @@ func (m model) View() string {
 }
 
 func main() {
+	usr, err := user.Current()
+	if err != nil {
+		fmt.Println("Impossible de récupérer l'utilisateur courant:", err)
+		return
+	}
+
+	m := initialModel()
+	pluginDir := m.pluginDir
+	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
+
+	home := usr.HomeDir
+	bashrcPath := filepath.Join(home, ".bashrc")
+
+	pluginBlock := fmt.Sprintf(`# Ajout Liste Plugin
+if [ -f %s ]; then 
+    source %s
+fi`, pluginFile, pluginFile)
+
+	// Vérification des arguments
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			// --- Créer le dossier ~/.Plugin s'il n'existe pas ---
+			if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
+				err := os.MkdirAll(pluginDir, 0755)
+				if err != nil {
+					fmt.Printf("Erreur création du dossier %s: %s", pluginDir, err)
+					return
+				}
+				fmt.Printf("Dossier %s créé.", pluginDir)
+			}
+
+			// --- Créer le fichier ~/.Plugin/.pluginbashrc ---
+			if _, err := os.Stat(pluginFile); os.IsNotExist(err) {
+				content := "# Plugin bashrc initialisé\n" + "alias Plugin=\"$HOME/.Plugin/Pannel\"\n"
+				err := os.WriteFile(pluginFile, []byte(content), 0644)
+				if err != nil {
+					fmt.Printf("Erreur création du fichier %s/.pluginbashrc: %s", pluginDir, err)
+					return
+				}
+				fmt.Printf("Fichier %s/.pluginbashrc créé.\n", pluginDir)
+			} else {
+				fmt.Printf("Fichier %s/.pluginbashrc déjà existant.\n", pluginDir)
+			}
+
+			// --- Ajouter le bloc dans ~/.bashrc ---
+			content, _ := os.ReadFile(bashrcPath)
+			if !strings.Contains(string(content), pluginBlock) {
+				f, err := os.OpenFile(bashrcPath, os.O_APPEND|os.O_WRONLY, 0644)
+				if err != nil {
+					fmt.Printf("Erreur ouverture %s/.bashrc: %s\n", home, err)
+					return
+				}
+				defer f.Close()
+
+				if _, err := f.WriteString("\n" + pluginBlock + "\n"); err != nil {
+					fmt.Printf("Erreur écriture dans %s/.bashrc: %s\n", home, err)
+					return
+				}
+				fmt.Printf("Bloc plugin ajouté à %s/.bashrc\n", home)
+			} else {
+				fmt.Printf("Bloc plugin déjà présent dans %s/.bashrc\n", home)
+			}
+			return
+
+		case "uninstall":
+			// --- Supprimer le fichier .pluginbashrc ---
+			if err := os.Remove(pluginFile); err == nil {
+				fmt.Printf("Fichier %s/.pluginbashrc supprimé.\n", pluginDir)
+			} else if os.IsNotExist(err) {
+				fmt.Printf("Fichier %s/.pluginbashrc déjà supprimé.\n", pluginDir)
+			} else {
+				fmt.Printf("Erreur suppression du fichier %s/.pluginbashrc: %s\n", pluginDir, err)
+			}
+
+			// --- Supprimer le bloc du ~/.bashrc ---
+			content, err := os.ReadFile(bashrcPath)
+			if err != nil {
+				fmt.Printf("Erreur lecture %s/.bashrc: %s\n", home, err)
+				return
+			}
+
+			newContent := strings.ReplaceAll(string(content), pluginBlock, "")
+			if err := os.WriteFile(bashrcPath, []byte(newContent), 0644); err != nil {
+				fmt.Printf("Erreur écriture %s/.bashrc: %s\n", home, err)
+				return
+			}
+			fmt.Printf("Bloc plugin supprimé de %s/.bashrc\n", home)
+			return
+
+		default:
+			fmt.Printf("Commande inconnue: %s\n", os.Args[1])
+			return
+		}
+	}
+
 	p := tea.NewProgram(
 		initialModel(),
 		tea.WithAltScreen(),
