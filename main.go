@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"plugin"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -93,11 +94,18 @@ var spinnerFrames = []string{"|", "/", "-", "\\"}
 // Initialisation
 func initialModel() model {
 	// Récupère le dossier où se trouve le binaire
-	baseDir, err := os.Getwd()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		fmt.Println("Erreur récupération chemin exécutable no OK:")
+		os.Exit(1)
+	}
+	baseDirWithNameFile := filepath.Dir(filename)
+	baseDir, err := filepath.Abs(baseDirWithNameFile)
 	if err != nil {
 		fmt.Println("Erreur récupération chemin exécutable:", err)
 		os.Exit(1)
 	}
+
 	pluginDir := filepath.Join(baseDir, "Plugin")
 
 	// Créer le dossier s'il n'existe pas
