@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"plugin"
 	"strings"
 	"sync"
@@ -63,31 +64,39 @@ func (s statusBar) render() string {
 
 // Le modèle contient l'état de l'application
 type model struct {
-	width        int
-	height       int
-	files        []GitHubFile
-	loading      bool
-	processing   bool
-	err          error
-	spinnerFrame int
-	cursor       int
-	statusMsg    string
-	localFiles   map[string]bool
-	selected     map[int]bool // Fichiers sélectionnés pour téléchargement/suppression
-	cmdTemplate  string       // Template du status
-	activePanel  int          // 0 = haut, 1 = bas, 2 = droite
-	logs         []string     // Historique des logs
-	tuiOutput    []string     // Sortie du TUI en cours d'exécution
-	runningTUI   string       // Nom du fichier TUI en cours d'exécution
-	embeddedTUI  tea.Model
-	tuiMutex     *sync.Mutex // Mutex pour l'accès concurrent
-	scrollOffset int         // Offset pour le scroll du contenu
+	width            int
+	height           int
+	files            []GitHubFile
+	loading          bool
+	processing       bool
+	err              error
+	spinnerFrame     int
+	cursor           int
+	statusMsg        string
+	localFiles       map[string]bool
+	selected         map[int]bool // Fichiers sélectionnés pour téléchargement/suppression
+	cmdTemplate      string       // Template du status
+	activePanel      int          // 0 = haut, 1 = bas, 2 = droite
+	logs             []string     // Historique des logs
+	tuiOutput        []string     // Sortie du TUI en cours d'exécution
+	runningTUI       string       // Nom du fichier TUI en cours d'exécution
+	embeddedTUI      tea.Model
+	tuiMutex         *sync.Mutex // Mutex pour l'accès concurrent
+	scrollOffset     int         // Offset pour le scroll du contenu
+	embeddedPluginID string      // Id plugin
+	pluginDir        string
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 // Initialisation
 func initialModel() model {
+	pluginDir := "./Plugin"
+	// Créer le dossier s'il n'existe pas
+	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
+		os.Mkdir(pluginDir, 0755)
+	}
+
 	return model{
 		loading:      true,
 		processing:   false,
@@ -104,6 +113,7 @@ func initialModel() model {
 		embeddedTUI:  nil,
 		tuiMutex:     &sync.Mutex{},
 		scrollOffset: 0,
+		pluginDir:    pluginDir,
 	}
 }
 
@@ -148,7 +158,7 @@ func fetchFiles() tea.Msg {
 }
 
 // Commande pour télécharger un fichier
-func downloadFile(file GitHubFile) tea.Cmd {
+func downloadFile(file GitHubFile, pluginDir string) tea.Cmd {
 	return func() tea.Msg {
 		if file.Type != "file" || file.DownloadURL == "" {
 			return operationCompleteMsg{filename: file.Name, operation: "download", err: fmt.Errorf("impossible de télécharger un dossier")}
@@ -160,7 +170,8 @@ func downloadFile(file GitHubFile) tea.Cmd {
 		}
 		defer resp.Body.Close()
 
-		out, err := os.Create(file.Name)
+		filePath := filepath.Join(pluginDir, file.Name)
+		out, err := os.Create(filePath)
 		if err != nil {
 			return operationCompleteMsg{filename: file.Name, operation: "download", err: err}
 		}
@@ -179,18 +190,20 @@ func downloadFile(file GitHubFile) tea.Cmd {
 }
 
 // Commande pour supprimer un fichier
-func deleteFile(filename string) tea.Cmd {
+func deleteFile(filename string, pluginDir string) tea.Cmd {
 	return func() tea.Msg {
-		err := os.Remove(filename)
+		filePath := filepath.Join(pluginDir, filename)
+		err := os.Remove(filePath)
 		return operationCompleteMsg{filename: filename, operation: "delete", err: err}
 	}
 }
 
 // Charger un plugin externe
-func loadPlugin(filename string) tea.Cmd {
+func loadPlugin(filename string, pluginDir string) tea.Cmd {
 	return func() tea.Msg {
 		// Ouvrir le plugin
-		plug, err := plugin.Open(filename)
+		pluginPath := filepath.Join(pluginDir, filename)
+		plug, err := plugin.Open(pluginPath)
 		if err != nil {
 			return pluginLoadedMsg{model: nil, err: fmt.Errorf("erreur ouverture plugin: %v", err)}
 		}
@@ -221,10 +234,10 @@ func processSelectedFiles(m model) tea.Cmd {
 		file := m.files[idx]
 		if m.localFiles[file.Name] {
 			// Fichier existe localement -> supprimer
-			cmds = append(cmds, deleteFile(file.Name))
+			cmds = append(cmds, deleteFile(file.Name, m.pluginDir))
 		} else {
 			// Fichier n'existe pas localement -> télécharger
-			cmds = append(cmds, downloadFile(file))
+			cmds = append(cmds, downloadFile(file, m.pluginDir))
 		}
 	}
 
@@ -240,26 +253,31 @@ func processSelectedFiles(m model) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
-	// Si un TUI est en cours, propager certains messages
+	// Si plugin actif : PROPAGER TOUS les messages au plugin
 	if m.embeddedTUI != nil && m.activePanel == 2 {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			// 's' pour arrêter le TUI
-			if msg.String() == "s" {
+		// Propager d'abord
+		newModel, c := m.embeddedTUI.Update(msg)
+		m.embeddedTUI = newModel
+		// Executer la commande renvoyée par le plugin (si présente)
+		cmd = c
+
+		// Gérer les messages "PLUGIN_QUIT:<id>" renvoyés par le plugin
+		if s, ok := msg.(string); ok && strings.HasPrefix(s, "PLUGIN_QUIT:") {
+			id := strings.TrimPrefix(s, "PLUGIN_QUIT:")
+			// Optionnel : vérifier que id correspond au plugin actif
+			if m.embeddedPluginID == "" || m.embeddedPluginID == id {
+				m.addLog("🛑 Plugin arrêté: " + id)
 				m.embeddedTUI = nil
+				m.embeddedPluginID = ""
 				m.runningTUI = ""
-				m.addLog("🛑 TUI arrêté")
 				m.activePanel = 0
+				// ne pas propager plus loin
 				return m, nil
 			}
-			// Sinon propager au TUI imbriqué
-			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
-			return m, cmd
-		case tea.WindowSizeMsg:
-			// Propager le resize au TUI imbriqué
-			m.embeddedTUI, cmd = m.embeddedTUI.Update(msg)
-			return m, cmd
 		}
+
+		// Sinon continuer le flux normal (retourner la commande du plugin)
+		return m, cmd
 	}
 
 	switch msg := msg.(type) {
@@ -303,7 +321,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.runningTUI = file.Name
 					m.addLog(fmt.Sprintf("▶️  Chargement de %s...", file.Name))
 					m.activePanel = 2
-					return m, loadPlugin(file.Name)
+					return m, loadPlugin(file.Name, m.pluginDir)
 				} else {
 					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
 				}
@@ -337,7 +355,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Vérifier quels fichiers existent localement
 			m.localFiles = make(map[string]bool)
 			for _, file := range m.files {
-				if _, err := os.Stat(file.Name); err == nil {
+				filePath := filepath.Join(m.pluginDir, file.Name)
+				if _, err := os.Stat(filePath); err == nil {
 					m.localFiles[file.Name] = true
 				}
 			}
@@ -618,9 +637,9 @@ func (m model) View() string {
 		statusBar.message = fmt.Sprintf("%d Plugin(s) sélectionné(s)", len(m.selected))
 	} else if m.runningTUI != "" {
 		statusBar.message = fmt.Sprintf("▶️  %s en cours d'exécution", m.runningTUI)
+	} else {
+		statusBar.commands = m.cmdTemplate
 	}
-
-	statusBar.commands = m.cmdTemplate
 
 	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render())
 }
