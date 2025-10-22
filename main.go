@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"plugin"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -92,20 +92,8 @@ type model struct {
 var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 // Initialisation
-func initialModel() model {
-	// Récupère le dossier où se trouve le binaire
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		fmt.Println("Erreur récupération chemin exécutable no OK:")
-		os.Exit(1)
-	}
-	baseDirWithNameFile := filepath.Dir(filename)
-	baseDir, err := filepath.Abs(baseDirWithNameFile)
-	if err != nil {
-		fmt.Println("Erreur récupération chemin exécutable:", err)
-		os.Exit(1)
-	}
-
+func initialModel(baseDir string) model {
+	// pluginDir = baseDir/.Plugin (si baseDir est un dossier fourni)
 	pluginDir := filepath.Join(baseDir, "Plugin")
 
 	// Créer le dossier s'il n'existe pas
@@ -725,7 +713,24 @@ func main() {
 		return
 	}
 
-	m := initialModel()
+	chemin := flag.String("c", "", "Chemin du fichier à utiliser")
+	flag.Parse()
+
+	var baseDir string
+	if *chemin != "" {
+		// si l'utilisateur spécifie un chemin, l'utiliser tel quel (prendre sa version absolue)
+		abs, err := filepath.Abs(*chemin)
+		if err != nil {
+			baseDir = *chemin
+		} else {
+			baseDir = abs
+		}
+	} else {
+		// Par défaut, utiliser le dossier utilisateur (HOME)
+		baseDir = filepath.Join(usr.HomeDir, ".Plugin/")
+	}
+
+	m := initialModel(baseDir)
 	pluginDir := m.pluginDir
 	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
 
@@ -733,35 +738,35 @@ func main() {
 	bashrcPath := filepath.Join(home, ".bashrc")
 
 	pluginBlock := fmt.Sprintf(`# Ajout Liste Plugin
-if [ -f %s ]; then 
+if [ -f %s/.pluginbashrc ]; then 
     source %s
-fi`, pluginFile, pluginFile)
+fi`, baseDir, baseDir)
 
 	// Vérification des arguments
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
-			// --- Créer le dossier ~/.Plugin s'il n'existe pas ---
+			// --- Créer le dossier ./.Plugin/Plugin s'il n'existe pas ---
 			if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 				err := os.MkdirAll(pluginDir, 0755)
 				if err != nil {
 					fmt.Printf("Erreur création du dossier %s: %s", pluginDir, err)
 					return
 				}
-				fmt.Printf("Dossier %s créé.", pluginDir)
+				fmt.Printf("Dossier %s créé.\n", pluginDir)
 			}
 
-			// --- Créer le fichier ~/.Plugin/.pluginbashrc ---
+			// --- Créer le fichier ./.Plugin/.pluginbashrc ---
 			if _, err := os.Stat(pluginFile); os.IsNotExist(err) {
 				content := "# Plugin bashrc initialisé\n" + "alias Plugin=\"$HOME/.Plugin/Pannel\"\n"
 				err := os.WriteFile(pluginFile, []byte(content), 0644)
 				if err != nil {
-					fmt.Printf("Erreur création du fichier %s/.pluginbashrc: %s", pluginDir, err)
+					fmt.Printf("Erreur création du fichier %s: %s", pluginFile, err)
 					return
 				}
-				fmt.Printf("Fichier %s/.pluginbashrc créé.\n", pluginDir)
+				fmt.Printf("Fichier %s créé.\n", pluginFile)
 			} else {
-				fmt.Printf("Fichier %s/.pluginbashrc déjà existant.\n", pluginDir)
+				fmt.Printf("Fichier %s déjà existant.\n", pluginFile)
 			}
 
 			// --- Ajouter le bloc dans ~/.bashrc ---
@@ -787,11 +792,11 @@ fi`, pluginFile, pluginFile)
 		case "uninstall":
 			// --- Supprimer le fichier .pluginbashrc ---
 			if err := os.Remove(pluginFile); err == nil {
-				fmt.Printf("Fichier %s/.pluginbashrc supprimé.\n", pluginDir)
+				fmt.Printf("Fichier %s supprimé.\n", pluginFile)
 			} else if os.IsNotExist(err) {
-				fmt.Printf("Fichier %s/.pluginbashrc déjà supprimé.\n", pluginDir)
+				fmt.Printf("Fichier %s déjà supprimé.\n", pluginFile)
 			} else {
-				fmt.Printf("Erreur suppression du fichier %s/.pluginbashrc: %s\n", pluginDir, err)
+				fmt.Printf("Erreur suppression du fichier %s: %s\n", pluginFile, err)
 			}
 
 			// --- Supprimer le bloc du ~/.bashrc ---
@@ -816,7 +821,7 @@ fi`, pluginFile, pluginFile)
 	}
 
 	p := tea.NewProgram(
-		initialModel(),
+		m,
 		tea.WithAltScreen(),
 	)
 
