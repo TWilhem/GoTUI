@@ -280,7 +280,7 @@ func addAliasToPluginBashrc(filename, pluginDir string) error {
 func removeAliasFromPluginBashrc(filename, pluginDir string) error {
 	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
 
-	aliasPrefix := fmt.Sprintf("alias %s='%s/%s'", strings.TrimSuffix(filename, filepath.Ext(filename)), pluginDir, filename)
+	aliasPrefix := fmt.Sprintf("alias %s='%s/Chargeur %s/%s'", strings.TrimSuffix(filename, filepath.Ext(filename)), filepath.Dir(pluginDir), pluginDir, filename)
 
 	content, err := os.ReadFile(pluginFile)
 	if err != nil {
@@ -733,6 +733,7 @@ func main() {
 	m := initialModel(baseDir)
 	pluginDir := m.pluginDir
 	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
+	chargeurFile := filepath.Join(filepath.Dir(pluginDir), "Chargeur")
 
 	home := usr.HomeDir
 	bashrcPath := filepath.Join(home, ".bashrc")
@@ -746,7 +747,7 @@ fi`, pluginFile, pluginFile)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
-			// --- Créer le dossier ./.Plugin/Plugin s'il n'existe pas ---
+			// --- Créer le dossier ./.Plugin/Plugin ---
 			if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 				err := os.MkdirAll(pluginDir, 0755)
 				if err != nil {
@@ -754,6 +755,26 @@ fi`, pluginFile, pluginFile)
 					return
 				}
 				fmt.Printf("Dossier %s créé.\n", pluginDir)
+			}
+
+			// --- Télecharge le fichier ./.Plugin/Chargeur ---
+			if _, err := os.Stat(chargeurFile); os.IsNotExist(err) {
+				chargeurFile := GitHubFile{
+					Name:        "Chargeur",
+					Type:        "file",
+					DownloadURL: "https://raw.githubusercontent.com/TWilhem/Plugin/main/Plugin/Chargeur",
+				}
+
+				cmd := downloadFile(chargeurFile, filepath.Dir(pluginDir))
+
+				msg := cmd()
+				if opMsg, ok := msg.(operationCompleteMsg); ok {
+					if opMsg.err != nil {
+						fmt.Printf("Erreur téléchargement Chargeur: %v\n", opMsg.err)
+						return
+					}
+					fmt.Printf("Fichier Chargeur téléchargé avec succès.\n")
+				}
 			}
 
 			// --- Créer le fichier ./.Plugin/.pluginbashrc ---
