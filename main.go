@@ -257,7 +257,7 @@ func processSelectedFiles(m model) tea.Cmd {
 func addAliasToPluginBashrc(filename, pluginDir string) error {
 	pluginFile := filepath.Join(filepath.Dir(pluginDir), ".pluginbashrc")
 
-	aliasLine := fmt.Sprintf("alias %s='%s/%s'\n", strings.TrimSuffix(filename, filepath.Ext(filename)), pluginDir, filename)
+	aliasLine := fmt.Sprintf("alias %s='%s/Chargeur %s/%s'\n", strings.TrimSuffix(filename, filepath.Ext(filename)), filepath.Dir(pluginDir), pluginDir, filename)
 
 	// Lire le contenu existant
 	content, _ := os.ReadFile(pluginFile)
@@ -762,7 +762,7 @@ fi`, pluginFile, pluginFile)
 				chargeurFile := GitHubFile{
 					Name:        "Chargeur",
 					Type:        "file",
-					DownloadURL: "https://raw.githubusercontent.com/TWilhem/Plugin/main/Plugin/Chargeur",
+					DownloadURL: "https://raw.githubusercontent.com/TWilhem/Plugin/main/Chargeur",
 				}
 
 				cmd := downloadFile(chargeurFile, filepath.Dir(pluginDir))
