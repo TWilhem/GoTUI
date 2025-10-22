@@ -833,6 +833,22 @@ fi`, pluginFile, pluginFile)
 				return
 			}
 			fmt.Printf("Bloc plugin supprimé de %s/.bashrc\n", home)
+
+			// --- Supprimer le repertoire ~/.Plugin/Plugin ---
+			if err := os.RemoveAll(pluginDir); err == nil {
+				fmt.Printf("Répertoire %s supprimé.\n", pluginDir)
+			} else {
+				fmt.Printf("Erreur suppression du répertoire %s: %s\n", pluginDir, err)
+			}
+
+			// --- Supprimer le fichier ~/.Plugin/Chargeur ---
+			if err := os.Remove(chargeurFile); err == nil {
+				fmt.Printf("Fichier %s supprimé.\n", chargeurFile)
+			} else if os.IsNotExist(err) {
+				fmt.Printf("Fichier %s déjà supprimé.\n", chargeurFile)
+			} else {
+				fmt.Printf("Erreur suppression du fichier %s: %s\n", chargeurFile, err)
+			}
 			return
 
 		default:
