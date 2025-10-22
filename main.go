@@ -187,7 +187,7 @@ func downloadFile(file GitHubFile, pluginDir string) tea.Cmd {
 		}
 
 		// Rendre le fichier exécutable
-		os.Chmod(file.Name, 0755)
+		os.Chmod(filePath, 0755)
 
 		return operationCompleteMsg{filename: file.Name, operation: "download", err: nil}
 	}
@@ -738,9 +738,9 @@ func main() {
 	bashrcPath := filepath.Join(home, ".bashrc")
 
 	pluginBlock := fmt.Sprintf(`# Ajout Liste Plugin
-if [ -f %s/.pluginbashrc ]; then 
+if [ -f %s ]; then 
     source %s
-fi`, baseDir, baseDir)
+fi`, pluginFile, pluginFile)
 
 	// Vérification des arguments
 	if len(os.Args) > 1 {
