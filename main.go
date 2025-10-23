@@ -313,9 +313,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Gérer les messages "PLUGIN_QUIT:<id>" renvoyés par le plugin
 		if s, ok := msg.(string); ok && strings.HasPrefix(s, "PLUGIN_QUIT:") {
 			id := strings.TrimPrefix(s, "PLUGIN_QUIT:")
-			// Optionnel : vérifier que id correspond au plugin actif
+			displayID := id
+			if displayID == "" {
+				displayID = m.runningTUI
+			}
+			// Vérifier que id correspond au plugin actif
 			if m.embeddedPluginID == "" || m.embeddedPluginID == id {
-				m.addLog("🛑 Plugin arrêté: " + id)
+				m.addLog("🛑 Plugin arrêté: " + displayID)
 				m.embeddedTUI = nil
 				m.embeddedPluginID = ""
 				m.runningTUI = ""
@@ -333,7 +337,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Quitter avec 'q' ou Ctrl+C
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
-			fmt.Println("🔄  Veuillez exécuter : source ~/.bashrc pour recharger vos alias.")
 			return m, tea.Quit
 		}
 
@@ -344,6 +347,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.activePanel = (m.activePanel + 1) % 2
 			}
+			m.scrollOffset = 0
 		}
 
 		// Navigation avec les flèches (seulement dans le panel du haut)
@@ -369,11 +373,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				file := m.files[m.cursor]
 				if m.localFiles[file.Name] {
 					m.runningTUI = file.Name
-					m.addLog(fmt.Sprintf("▶️  Chargement de %s...", file.Name))
+					m.addLog(fmt.Sprintf("▶️ Chargement de %s", file.Name))
 					m.activePanel = 2
 					return m, loadPlugin(file.Name, m.pluginDir)
 				} else {
-					m.addLog(fmt.Sprintf("⚠️  %s n'est pas téléchargé", file.Name))
+					m.addLog(fmt.Sprintf("⚠️ %s n'est pas téléchargé", file.Name))
 				}
 			case "enter":
 				// Télécharger/Supprimer les fichiers sélectionnés
@@ -386,6 +390,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "c":
 				// Annuler toutes les sélections
 				m.selected = make(map[int]bool)
+			}
+		}
+
+		// === Scroll du panneau de logs (panel 1) ===
+		if m.activePanel == 1 && len(m.logs) > 0 {
+			switch msg.String() {
+			case "up", "k":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+			case "down", "j":
+				if m.scrollOffset < len(m.logs)-57 {
+					m.scrollOffset++
+				}
+			case "ctrl+up": // aller tout en haut
+				m.scrollOffset = 0
+			case "ctrl+down": // aller tout en bas
+				m.scrollOffset = len(m.logs) - 57
 			}
 		}
 
@@ -420,20 +442,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.operation == "download" {
 				m.statusMsg = fmt.Sprintf("✅ %s téléchargé!", msg.filename)
 				m.localFiles[msg.filename] = true
-				m.addLog(fmt.Sprintf("⬇️  %s téléchargé avec succès", msg.filename))
+				m.addLog(fmt.Sprintf("⬇️ %s téléchargé avec succès", msg.filename))
 				// ✅ Ajouter l'alias automatiquement
 				if err := addAliasToPluginBashrc(msg.filename, m.pluginDir); err != nil {
-					m.addLog(fmt.Sprintf("⚠️  Impossible d'ajouter l'alias pour %s: %v", msg.filename, err))
+					m.addLog(fmt.Sprintf("⚠️ Impossible d'ajouter l'alias pour %s: %v", msg.filename, err))
 				} else {
 					m.addLog(fmt.Sprintf("🔗 Alias ajouté pour %s", msg.filename))
 				}
 			} else {
-				m.statusMsg = fmt.Sprintf("🗑️  %s supprimé!", msg.filename)
+				m.statusMsg = fmt.Sprintf("🗑️ %s supprimé!", msg.filename)
 				delete(m.localFiles, msg.filename)
-				m.addLog(fmt.Sprintf("🗑️  %s supprimé avec succès", msg.filename))
+				m.addLog(fmt.Sprintf("🗑️ %s supprimé avec succès", msg.filename))
 				// ✅ Supprimer l'alias automatiquement
 				if err := removeAliasFromPluginBashrc(msg.filename, m.pluginDir); err != nil {
-					m.addLog(fmt.Sprintf("⚠️  Impossible de retirer l'alias pour %s: %v", msg.filename, err))
+					m.addLog(fmt.Sprintf("⚠️ Impossible de retirer l'alias pour %s: %v", msg.filename, err))
 				} else {
 					m.addLog(fmt.Sprintf("🔗 Alias supprimé pour %s", msg.filename))
 				}
@@ -490,7 +512,7 @@ func (m model) View() string {
 	// Largeur pour les panels gauches
 	leftPanelWidth := 35
 	// Largeur pour le panel droit (TUI)
-	rightPanelWidth := m.width - leftPanelWidth - 6
+	rightPanelWidth := m.width - leftPanelWidth - 4
 
 	// Calculer la hauteur disponible
 	availableHeight := m.height - 1
@@ -637,6 +659,46 @@ func (m model) View() string {
 	if m.embeddedTUI != nil {
 		// Afficher le TUI imbriqué
 		rightContent.WriteString(m.embeddedTUI.View())
+	} else if m.activePanel == 1 {
+		if len(m.logs) != 0 {
+			maxLogs := 0
+			if m.scrollOffset == 0 {
+				maxLogs = rightPanelHeight - 3
+			} else {
+				maxLogs = rightPanelHeight - 5
+			}
+			if maxLogs < 1 {
+				maxLogs = 1
+			}
+
+			// Calculer la fenêtre visible avec le scroll
+			visibleStart := len(m.logs) - maxLogs - m.scrollOffset
+			if visibleStart < 0 {
+				visibleStart = 0
+			}
+			visibleEnd := visibleStart + maxLogs
+			if visibleEnd > len(m.logs) {
+				visibleEnd = len(m.logs)
+			}
+
+			maxLogWidth := rightPanelWidth - 6
+
+			for i := visibleEnd - 1; i >= visibleStart; i-- {
+				log := m.logs[i]
+				if len(log) > maxLogWidth {
+					log = log[:maxLogWidth-3] + "..."
+				}
+				rightContent.WriteString(log + "\n")
+			}
+
+			// Indicateur visuel du scroll
+			if m.scrollOffset > 0 {
+				rightContent.WriteString(fmt.Sprintf("\n▲ %d log(s) précédents\n", m.scrollOffset))
+			}
+		} else {
+			rightContent.WriteString("Aucun log à afficher...")
+		}
+
 	} else {
 		rightContent.WriteString("Exécution TUI\n\n")
 		rightContent.WriteString("Sélectionnez un fichier\n")
@@ -698,7 +760,7 @@ func (m model) View() string {
 	} else if len(m.selected) > 0 {
 		statusBar.message = fmt.Sprintf("%d Plugin(s) sélectionné(s)", len(m.selected))
 	} else if m.runningTUI != "" {
-		statusBar.message = fmt.Sprintf("▶️  %s en cours d'exécution", m.runningTUI)
+		statusBar.message = fmt.Sprintf("▶️ %s en cours d'exécution", m.runningTUI)
 	} else {
 		statusBar.commands = m.cmdTemplate
 	}
@@ -779,7 +841,7 @@ fi`, pluginFile, pluginFile)
 
 			// --- Créer le fichier ./.Plugin/.pluginbashrc ---
 			if _, err := os.Stat(pluginFile); os.IsNotExist(err) {
-				content := "# Plugin bashrc initialisé\n" + "alias Plugin=\"$HOME/.Plugin/Pannel\"\n"
+				content := "# Plugin bashrc initialisé\n" + "alias Plugin=\"$HOME/.Plugin/Pannel && source ~/.bashrc\"\n"
 				err := os.WriteFile(pluginFile, []byte(content), 0644)
 				if err != nil {
 					fmt.Printf("Erreur création du fichier %s: %s", pluginFile, err)
