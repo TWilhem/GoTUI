@@ -55,13 +55,32 @@ type statusBar struct {
 	commands string
 }
 
-func (s statusBar) render() string {
+func (s statusBar) render(width int) string {
 	if s.message != "" && s.commands != "" {
-		return fmt.Sprintf("%s | %s", s.message, s.commands)
+		// Calculer l'espace disponible pour les commandes et massages
+		messageLen := len(s.message)
+		separator := " | "
+		availableForCommands := width - messageLen - len(separator) - 2
+
+		commands := s.commands
+		if len(commands) > availableForCommands && availableForCommands > 3 {
+			commands = commands[:availableForCommands-3] + "..."
+		}
+		return fmt.Sprintf("%s%s%s", s.message, separator, commands)
 	} else if s.message != "" {
 		return s.message
+	} else if s.commands != "" {
+		// Calculer l'espace disponible pour juste les commandes
+		availableForCommands := width
+
+		commands := s.commands
+		if len(commands) > availableForCommands && availableForCommands > 3 {
+			commands = commands[:availableForCommands-3] + "..."
+		}
+		return commands
 	}
-	return s.commands
+	return ""
+
 }
 
 // Le modèle contient l'état de l'application
@@ -109,7 +128,7 @@ func initialModel(baseDir string) model {
 		cursor:       0,
 		localFiles:   make(map[string]bool),
 		selected:     make(map[int]bool),
-		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Execution: e | Validation: Enter | Annuler: c | Stop: s | Quitter: q",
+		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Execution: e | Validation: Enter | Annuler: c | Quitter: q",
 		activePanel:  0,
 		logs:         []string{},
 		tuiOutput:    []string{},
@@ -519,10 +538,13 @@ func (m model) View() string {
 
 	// Hauteur fixe pour chaque panel gauche
 	topHeight := int(float64(availableHeight) * 0.6)
-	bottomHeight := availableHeight - topHeight - 4
+	bottomHeight := 0
 
 	// Hauteur du panel de droite
-	rightPanelHeight := availableHeight - 2
+	rightPanelHeight := 0
+
+	bottomHeight = availableHeight - topHeight - 4
+	rightPanelHeight = availableHeight - 2
 
 	// Styles pour les panels gauches
 	topBoxStyle := lipgloss.NewStyle().
@@ -741,7 +763,7 @@ func (m model) View() string {
 		rightStyle.Render(rightContent.String()),
 	)
 
-	panelsHeight := topHeight + bottomHeight + 4
+	panelsHeight := topHeight + bottomHeight + 5
 	spacerHeight := availableHeight - panelsHeight
 	if spacerHeight < 0 {
 		spacerHeight = 0
@@ -765,7 +787,7 @@ func (m model) View() string {
 		statusBar.commands = m.cmdTemplate
 	}
 
-	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render())
+	return allPanels + spacer + "\n" + statusStyle.Render(statusBar.render(m.width))
 }
 
 func main() {
