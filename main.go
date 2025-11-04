@@ -206,7 +206,7 @@ func downloadFile(file GitHubFile, pluginDir string) tea.Cmd {
 		}
 
 		// Rendre le fichier exécutable
-		os.Chmod(filePath, 0755)
+		os.Chmod(filePath, 0644)
 
 		return operationCompleteMsg{filename: file.Name, operation: "download", err: nil}
 	}
