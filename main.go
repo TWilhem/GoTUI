@@ -843,14 +843,15 @@ fi`, pluginFile, pluginFile)
 
 			// --- Télecharge le fichier ./.Plugin/Chargeur ---
 			if _, err := os.Stat(chargeurFile); os.IsNotExist(err) {
-				chargeurFile := GitHubFile{
+				DownloadchargeurFile := GitHubFile{
 					Name:        "Chargeur",
 					Type:        "file",
 					DownloadURL: "https://raw.githubusercontent.com/TWilhem/Plugin/main/Chargeur",
 				}
 
-				cmd := downloadFile(chargeurFile, filepath.Dir(pluginDir))
+				cmd := downloadFile(DownloadchargeurFile, filepath.Dir(pluginDir))
 
+				os.Chmod(filepath.Join(filepath.Dir(pluginDir), chargeurFile), 0755)
 				msg := cmd()
 				if opMsg, ok := msg.(operationCompleteMsg); ok {
 					if opMsg.err != nil {
