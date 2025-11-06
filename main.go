@@ -25,6 +25,11 @@ type GitHubFile struct {
 	DownloadURL string `json:"download_url"`
 }
 
+// Structure pour le fichier repo.conf
+type RepoConfig struct {
+	URLs []string `json:"urls"`
+}
+
 // Message contenant la liste des fichiers
 type filesLoadedMsg struct {
 	files []GitHubFile
@@ -148,7 +153,7 @@ func (m *model) addLog(message string) {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchFiles, tickCmd())
+	return tea.Batch(fetchFiles(m.pluginDir), tickCmd())
 }
 
 // Commande pour le tick du spinner
@@ -159,25 +164,72 @@ func tickCmd() tea.Cmd {
 }
 
 // Commande pour récupérer les fichiers
-func fetchFiles() tea.Msg {
-	url := "https://api.github.com/repos/TWilhem/Plugin/contents/Plugin"
+func fetchFiles(pluginDir string) tea.Cmd {
+	return func() tea.Msg {
+		var allFiles []GitHubFile
 
+		// Chemin du fichier de configuration
+		configPath := filepath.Join(filepath.Dir(pluginDir), "repo.conf")
+
+		// Vérifier si le fichier repo.conf existe
+		if _, err := os.Stat(configPath); err == nil {
+			// Lire le fichier de configuration
+			configData, err := os.ReadFile(configPath)
+			if err != nil {
+				return filesLoadedMsg{files: nil, err: fmt.Errorf("erreur lecture repo.conf: %v", err)}
+			}
+
+			var config RepoConfig
+			if err := json.Unmarshal(configData, &config); err != nil {
+				return filesLoadedMsg{files: nil, err: fmt.Errorf("erreur parsing repo.conf: %v", err)}
+			}
+
+			// Parcourir toutes les URLs du fichier de configuration
+			for _, url := range config.URLs {
+				files, err := fetchFromURL(url)
+				if err != nil {
+					// Continuer même en cas d'erreur sur une URL
+					continue
+				}
+				allFiles = append(allFiles, files...)
+			}
+
+			if len(allFiles) == 0 {
+				return filesLoadedMsg{files: nil, err: fmt.Errorf("aucun fichier trouvé dans les URLs de repo.conf")}
+			}
+
+			return filesLoadedMsg{files: allFiles, err: nil}
+		}
+
+		// Si repo.conf n'existe pas, utiliser l'URL par défaut
+		defaultURL := "https://api.github.com/repos/TWilhem/Plugin/contents/Plugin"
+		files, err := fetchFromURL(defaultURL)
+		if err != nil {
+			return filesLoadedMsg{files: nil, err: err}
+		}
+
+		return filesLoadedMsg{files: files, err: nil}
+	}
+}
+
+// Fonction auxiliaire pour récupérer les fichiers depuis une URL
+func fetchFromURL(url string) ([]GitHubFile, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return filesLoadedMsg{files: nil, err: err}
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return filesLoadedMsg{files: nil, err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+		return nil, fmt.Errorf("HTTP %d pour %s", resp.StatusCode, url)
 	}
 
 	var gitHubFiles []GitHubFile
 	if err := json.NewDecoder(resp.Body).Decode(&gitHubFiles); err != nil {
-		return filesLoadedMsg{files: nil, err: err}
+		return nil, err
 	}
 
-	return filesLoadedMsg{files: gitHubFiles, err: nil}
+	return gitHubFiles, nil
 }
 
 // Commande pour télécharger un fichier
