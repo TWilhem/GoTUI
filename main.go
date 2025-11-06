@@ -27,12 +27,23 @@ type GitHubFile struct {
 
 // Structure pour le fichier repo.conf
 type RepoConfig struct {
-	URLs []string `json:"urls"`
+	Repos []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	} `json:"repos"`
+}
+
+// Structure pour un repository
+type Repository struct {
+	Name      string
+	URL       string
+	Files     []GitHubFile
+	Collapsed bool // true = replié, false = déplié
 }
 
 // Message contenant la liste des fichiers
 type filesLoadedMsg struct {
-	files []GitHubFile
+	repos []Repository
 	err   error
 }
 
@@ -88,11 +99,20 @@ func (s statusBar) render(width int) string {
 
 }
 
+// Structure pour représenter une ligne affichée
+type displayLine struct {
+	isRepo   bool
+	repoIdx  int
+	fileIdx  int
+	text     string
+	isHeader bool
+}
+
 // Le modèle contient l'état de l'application
 type model struct {
 	width            int
 	height           int
-	files            []GitHubFile
+	repos            []Repository
 	loading          bool
 	processing       bool
 	err              error
@@ -100,17 +120,18 @@ type model struct {
 	cursor           int
 	statusMsg        string
 	localFiles       map[string]bool
-	selected         map[int]bool // Fichiers sélectionnés pour téléchargement/suppression
-	cmdTemplate      string       // Template du status
-	activePanel      int          // 0 = haut, 1 = bas, 2 = droite
-	logs             []string     // Historique des logs
-	tuiOutput        []string     // Sortie du TUI en cours d'exécution
-	runningTUI       string       // Nom du fichier TUI en cours d'exécution
-	embeddedTUI      tea.Model
-	tuiMutex         *sync.Mutex // Mutex pour l'accès concurrent
-	scrollOffset     int         // Offset pour le scroll du contenu
-	embeddedPluginID string      // Id plugin
-	pluginDir        string
+	selected         map[string]bool // Clé: "repoIdx:fileIdx"
+	cmdTemplate      string          // Template du status
+	activePanel      int             // 0 = haut, 1 = bas, 2 = droite
+	logs             []string        // Historique des logs
+	tuiOutput        []string        // Sortie du TUI en cours d'exécution
+	runningTUI       string          // Nom du fichier TUI en cours d'exécution
+	embeddedTUI      tea.Model       //
+	tuiMutex         *sync.Mutex     // Mutex pour l'accès concurrent
+	scrollOffset     int             // Offset pour le scroll du contenu
+	embeddedPluginID string          // Id plugin
+	pluginDir        string          //
+	displayLines     []displayLine   // Lignes à afficher
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -128,12 +149,12 @@ func initialModel(baseDir string) model {
 	return model{
 		loading:      true,
 		processing:   false,
-		files:        []GitHubFile{},
+		repos:        []Repository{},
 		spinnerFrame: 0,
 		cursor:       0,
 		localFiles:   make(map[string]bool),
-		selected:     make(map[int]bool),
-		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Execution: e | Validation: Enter | Annuler: c | Quitter: q",
+		selected:     make(map[string]bool),
+		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Replier/Déplier/Validé: Enter | Execution: e | Annuler: c | Quitter: q",
 		activePanel:  0,
 		logs:         []string{},
 		tuiOutput:    []string{},
@@ -142,6 +163,7 @@ func initialModel(baseDir string) model {
 		tuiMutex:     &sync.Mutex{},
 		scrollOffset: 0,
 		pluginDir:    pluginDir,
+		displayLines: []displayLine{},
 	}
 }
 
@@ -150,6 +172,35 @@ func (m *model) addLog(message string) {
 	timestamp := time.Now().Format("15:04:05")
 	logEntry := fmt.Sprintf("[%s] %s", timestamp, message)
 	m.logs = append(m.logs, logEntry)
+}
+
+// Construire la liste des lignes à afficher
+func (m *model) buildDisplayLines() {
+	m.displayLines = []displayLine{}
+
+	for repoIdx, repo := range m.repos {
+		// Ajouter la ligne du repository (header)
+		m.displayLines = append(m.displayLines, displayLine{
+			isRepo:   true,
+			repoIdx:  repoIdx,
+			fileIdx:  -1,
+			text:     repo.Name,
+			isHeader: true,
+		})
+
+		// Si le repo n'est pas replié, ajouter ses fichiers
+		if !repo.Collapsed {
+			for fileIdx, file := range repo.Files {
+				m.displayLines = append(m.displayLines, displayLine{
+					isRepo:   false,
+					repoIdx:  repoIdx,
+					fileIdx:  fileIdx,
+					text:     file.Name,
+					isHeader: false,
+				})
+			}
+		}
+	}
 }
 
 func (m model) Init() tea.Cmd {
@@ -161,55 +212,6 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
-}
-
-// Commande pour récupérer les fichiers
-func fetchFiles(pluginDir string) tea.Cmd {
-	return func() tea.Msg {
-		var allFiles []GitHubFile
-
-		// Chemin du fichier de configuration
-		configPath := filepath.Join(filepath.Dir(pluginDir), "repo.conf")
-
-		// Vérifier si le fichier repo.conf existe
-		if _, err := os.Stat(configPath); err == nil {
-			// Lire le fichier de configuration
-			configData, err := os.ReadFile(configPath)
-			if err != nil {
-				return filesLoadedMsg{files: nil, err: fmt.Errorf("erreur lecture repo.conf: %v", err)}
-			}
-
-			var config RepoConfig
-			if err := json.Unmarshal(configData, &config); err != nil {
-				return filesLoadedMsg{files: nil, err: fmt.Errorf("erreur parsing repo.conf: %v", err)}
-			}
-
-			// Parcourir toutes les URLs du fichier de configuration
-			for _, url := range config.URLs {
-				files, err := fetchFromURL(url)
-				if err != nil {
-					// Continuer même en cas d'erreur sur une URL
-					continue
-				}
-				allFiles = append(allFiles, files...)
-			}
-
-			if len(allFiles) == 0 {
-				return filesLoadedMsg{files: nil, err: fmt.Errorf("aucun fichier trouvé dans les URLs de repo.conf")}
-			}
-
-			return filesLoadedMsg{files: allFiles, err: nil}
-		}
-
-		// Si repo.conf n'existe pas, utiliser l'URL par défaut
-		defaultURL := "https://api.github.com/repos/TWilhem/Plugin/contents/Plugin"
-		files, err := fetchFromURL(defaultURL)
-		if err != nil {
-			return filesLoadedMsg{files: nil, err: err}
-		}
-
-		return filesLoadedMsg{files: files, err: nil}
-	}
 }
 
 // Fonction auxiliaire pour récupérer les fichiers depuis une URL
@@ -230,6 +232,67 @@ func fetchFromURL(url string) ([]GitHubFile, error) {
 	}
 
 	return gitHubFiles, nil
+}
+
+// Commande pour récupérer les fichiers
+func fetchFiles(pluginDir string) tea.Cmd {
+	return func() tea.Msg {
+		var repos []Repository
+
+		// Chemin du fichier de configuration
+		configPath := filepath.Join(filepath.Dir(pluginDir), "repo.conf")
+
+		// Vérifier si le fichier repo.conf existe
+		if _, err := os.Stat(configPath); err == nil {
+			// Lire le fichier de configuration
+			configData, err := os.ReadFile(configPath)
+			if err != nil {
+				return filesLoadedMsg{repos: nil, err: fmt.Errorf("erreur lecture repo.conf: %v", err)}
+			}
+
+			var config RepoConfig
+			if err := json.Unmarshal(configData, &config); err != nil {
+				return filesLoadedMsg{repos: nil, err: fmt.Errorf("erreur parsing repo.conf: %v", err)}
+			}
+
+			// Parcourir toutes les URLs du fichier de configuration
+			for _, repoConf := range config.Repos {
+				files, err := fetchFromURL(repoConf.URL)
+				if err != nil {
+					// Continuer même en cas d'erreur sur une URL
+					continue
+				}
+				repos = append(repos, Repository{
+					Name:      repoConf.Name,
+					URL:       repoConf.URL,
+					Files:     files,
+					Collapsed: false,
+				})
+			}
+
+			if len(repos) == 0 {
+				return filesLoadedMsg{repos: nil, err: fmt.Errorf("aucun repo trouvé dans repo.conf")}
+			}
+
+			return filesLoadedMsg{repos: repos, err: nil}
+		}
+
+		// Si repo.conf n'existe pas, utiliser l'URL par défaut
+		defaultURL := "https://api.github.com/repos/TWilhem/Plugin/contents/Plugin"
+		files, err := fetchFromURL(defaultURL)
+		if err != nil {
+			return filesLoadedMsg{repos: nil, err: err}
+		}
+
+		repos = append(repos, Repository{
+			Name:      "TWilhem/Plugin",
+			URL:       defaultURL,
+			Files:     files,
+			Collapsed: false,
+		})
+
+		return filesLoadedMsg{repos: repos, err: nil}
+	}
 }
 
 // Commande pour télécharger un fichier
@@ -305,18 +368,29 @@ func loadPlugin(filename string, pluginDir string) tea.Cmd {
 func processSelectedFiles(m model) tea.Cmd {
 	var cmds []tea.Cmd
 
-	for idx := range m.selected {
-		file := m.files[idx]
+	for key := range m.selected {
+		parts := strings.Split(key, ":")
+		if len(parts) != 2 {
+			continue
+		}
+
+		var repoIdx, fileIdx int
+		fmt.Sscanf(parts[0], "%d", &repoIdx)
+		fmt.Sscanf(parts[1], "%d", &fileIdx)
+
+		if repoIdx >= len(m.repos) || fileIdx >= len(m.repos[repoIdx].Files) {
+			continue
+		}
+
+		file := m.repos[repoIdx].Files[fileIdx]
+
 		if m.localFiles[file.Name] {
-			// Fichier existe localement -> supprimer
 			cmds = append(cmds, deleteFile(file.Name, m.pluginDir))
 		} else {
-			// Fichier n'existe pas localement -> télécharger
 			cmds = append(cmds, downloadFile(file, m.pluginDir))
 		}
 	}
 
-	// Ajouter une commande finale pour signaler la fin
 	cmds = append(cmds, func() tea.Msg {
 		return allOperationsCompleteMsg{}
 	})
@@ -422,45 +496,63 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Navigation avec les flèches (seulement dans le panel du haut)
-		if !m.loading && !m.processing && len(m.files) > 0 && m.activePanel == 0 {
+		if !m.loading && !m.processing && len(m.displayLines) > 0 && m.activePanel == 0 {
 			switch msg.String() {
 			case "up", "k":
 				if m.cursor > 0 {
 					m.cursor--
 				}
 			case "down", "j":
-				if m.cursor < len(m.files)-1 {
+				if m.cursor < len(m.displayLines)-1 {
 					m.cursor++
+				}
+			case "enter":
+				// Replier/déplier le repository
+				line := m.displayLines[m.cursor]
+				if line.isHeader {
+					m.repos[line.repoIdx].Collapsed = !m.repos[line.repoIdx].Collapsed
+					m.buildDisplayLines()
+					// Ajuster le curseur si nécessaire
+					if m.cursor >= len(m.displayLines) {
+						m.cursor = len(m.displayLines) - 1
+					}
+				} else {
+					// Valider les opérations
+					if len(m.selected) > 0 {
+						m.processing = true
+						m.statusMsg = fmt.Sprintf("Traitement de %d Plugin(s)...", len(m.selected))
+						m.addLog(fmt.Sprintf("🚀 Démarrage du traitement de %d Plugin(s)", len(m.selected)))
+						return m, processSelectedFiles(m)
+					}
 				}
 			case " ":
 				// Sélectionner/désélectionner le fichier actuel
-				if m.selected[m.cursor] {
-					delete(m.selected, m.cursor)
-				} else {
-					m.selected[m.cursor] = true
+				line := m.displayLines[m.cursor]
+				if !line.isHeader {
+					key := fmt.Sprintf("%d:%d", line.repoIdx, line.fileIdx)
+					if m.selected[key] {
+						delete(m.selected, key)
+					} else {
+						m.selected[key] = true
+					}
 				}
 			case "e":
 				// Exécuter le TUI du fichier sélectionné
-				file := m.files[m.cursor]
-				if m.localFiles[file.Name] {
-					m.runningTUI = file.Name
-					m.addLog(fmt.Sprintf("▶️ Chargement de %s", file.Name))
-					m.activePanel = 2
-					return m, loadPlugin(file.Name, m.pluginDir)
-				} else {
-					m.addLog(fmt.Sprintf("⚠️ %s n'est pas téléchargé", file.Name))
-				}
-			case "enter":
-				// Télécharger/Supprimer les fichiers sélectionnés
-				if len(m.selected) > 0 {
-					m.processing = true
-					m.statusMsg = fmt.Sprintf("Traitement de %d Plugin(s)...", len(m.selected))
-					m.addLog(fmt.Sprintf("🚀 Démarrage du traitement de %d Plugin(s)", len(m.selected)))
-					return m, processSelectedFiles(m)
+				line := m.displayLines[m.cursor]
+				if !line.isHeader {
+					file := m.repos[line.repoIdx].Files[line.fileIdx]
+					if m.localFiles[file.Name] {
+						m.runningTUI = file.Name
+						m.addLog(fmt.Sprintf("▶️ Chargement de %s", file.Name))
+						m.activePanel = 2
+						return m, loadPlugin(file.Name, m.pluginDir)
+					} else {
+						m.addLog(fmt.Sprintf("⚠️ %s n'est pas téléchargé", file.Name))
+					}
 				}
 			case "c":
 				// Annuler toutes les sélections
-				m.selected = make(map[int]bool)
+				m.selected = make(map[string]bool)
 			}
 		}
 
@@ -493,16 +585,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 			m.addLog(fmt.Sprintf("❌ Erreur lors du chargement: %v", msg.err))
 		} else {
-			m.files = msg.files
-			m.addLog(fmt.Sprintf("✅ %d Plugin(s) chargé(s)", len(msg.files)))
+			m.repos = msg.repos
+			totalFiles := 0
+			for _, repo := range m.repos {
+				totalFiles += len(repo.Files)
+			}
+			m.addLog(fmt.Sprintf("✅ %d Repository(s) chargé(s) avec %d Plugin(s)", len(msg.repos), totalFiles))
+
 			// Vérifier quels fichiers existent localement
 			m.localFiles = make(map[string]bool)
-			for _, file := range m.files {
-				filePath := filepath.Join(m.pluginDir, file.Name)
-				if _, err := os.Stat(filePath); err == nil {
-					m.localFiles[file.Name] = true
+			for _, repo := range m.repos {
+				for _, file := range repo.Files {
+					filePath := filepath.Join(m.pluginDir, file.Name)
+					if _, err := os.Stat(filePath); err == nil {
+						m.localFiles[file.Name] = true
+					}
 				}
 			}
+			// Construire la liste d'affichage
+			m.buildDisplayLines()
 		}
 
 	case operationCompleteMsg:
@@ -540,7 +641,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case allOperationsCompleteMsg:
 		m.processing = false
-		m.selected = make(map[int]bool)
+		m.selected = make(map[string]bool)
 		m.statusMsg = "✅ Toutes les opérations terminées!"
 		m.addLog("✅ Toutes les opérations terminées!")
 		// Effacer le message après 3 secondes
@@ -662,40 +763,63 @@ func (m model) View() string {
 	toDeleteStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("1"))
 
+	repoHeaderStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("15"))
+
 	// === PANEL DU HAUT ===
 	var topContent strings.Builder
-	topContent.WriteString("Repository: TWilhem/Plugin\n\n")
+	topContent.WriteString("Repositories disponible\n\n")
 
 	if m.loading {
-		topContent.WriteString("Chargement des Plugin...\n\n")
+		topContent.WriteString("Chargement des Repositories...\n\n")
 	} else if m.err != nil {
 		topContent.WriteString(fmt.Sprintf("❌ Erreur: %v\n\n", m.err))
-	} else if len(m.files) == 0 {
-		topContent.WriteString("Aucun Plugin trouvé\n\n")
+	} else if len(m.repos) == 0 {
+		topContent.WriteString("Aucun Repository trouvé\n\n")
 	} else {
-		topContent.WriteString(fmt.Sprintf("%d Plugin disponible:\n\n", len(m.files)))
-		for i, file := range m.files {
-			var textStyle lipgloss.Style
-			if m.selected[i] && m.localFiles[file.Name] {
-				textStyle = toDeleteStyle
-			} else if m.localFiles[file.Name] || (m.selected[i] && !m.localFiles[file.Name]) {
-				textStyle = downloadedStyle
-			} else {
-				textStyle = notDownloadedStyle
-			}
+		for i, line := range m.displayLines {
+			if line.isHeader {
+				// Afficher le nom du repo avec indicateur de pliage
+				indicator := "▼"
+				if m.repos[line.repoIdx].Collapsed {
+					indicator = "▶"
+				}
+				headerText := fmt.Sprintf("%s %s", indicator, line.text)
 
-			// Ajouter un indicateur si c'est le TUI en cours
-			prefix := ""
-			if file.Name == m.runningTUI {
-				prefix = "▶ "
-			}
-
-			if i == m.cursor && m.activePanel == 0 {
-				selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
-				paddedLine := prefix + file.Name + strings.Repeat(" ", leftPanelWidth-len(file.Name)-len(prefix)-4)
-				topContent.WriteString(selectedWithColor.Render(paddedLine) + "\n")
+				if i == m.cursor && m.activePanel == 0 {
+					paddedLine := headerText + strings.Repeat(" ", leftPanelWidth-len(headerText)-4)
+					topContent.WriteString(selectedStyle.Render(paddedLine) + "\n")
+				} else {
+					topContent.WriteString(repoHeaderStyle.Render(headerText) + "\n")
+				}
 			} else {
-				topContent.WriteString(textStyle.Render(prefix+file.Name) + "\n")
+				// Afficher un fichier
+				file := m.repos[line.repoIdx].Files[line.fileIdx]
+				key := fmt.Sprintf("%d:%d", line.repoIdx, line.fileIdx)
+
+				var textStyle lipgloss.Style
+				if m.selected[key] && m.localFiles[file.Name] {
+					textStyle = toDeleteStyle
+				} else if m.localFiles[file.Name] || (m.selected[key] && !m.localFiles[file.Name]) {
+					textStyle = downloadedStyle
+				} else {
+					textStyle = notDownloadedStyle
+				}
+
+				prefix := "  "
+				if file.Name == m.runningTUI {
+					prefix = "- "
+				}
+
+				displayText := prefix + file.Name
+
+				if i == m.cursor && m.activePanel == 0 {
+					selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
+					paddedLine := displayText + strings.Repeat(" ", leftPanelWidth-len(displayText)-4)
+					topContent.WriteString(selectedWithColor.Render(paddedLine) + "\n")
+				} else {
+					topContent.WriteString(textStyle.Render(displayText) + "\n")
+				}
 			}
 		}
 	}

@@ -1,14 +1,18 @@
-# GoTUI
+# GoTUI (Pannel)
 
-**GoTUI** est une interface **TUI (Text-based User Interface)** écrite en **Go** utilisant le framework [Bubbletea](https://github.com/charmbracelet/bubbletea).  
-Elle permet de **gérer dynamiquement des plugins** destinés à simplifier le **management de systèmes Debian/Linux**, en offrant un environnement visuel complet dans le terminal.
+**GoTUI** est une interface **TUI (Text-based User Interface)** écrite en **Go** utilisant le framework [Bubbletea](https://github.com/charmbracelet/bubbletea) et [Lipgloss](https://github.com/charmbracelet/lipgloss).  
+Elle permet de **gérer dynamiquement des plugins Go** (.so) à partir de dépôts GitHub ou de sources locales, tout en offrant un environnement ergonomique et interactif directement dans le terminal **Linux/Debian**.
+
+![TUI](https://raw.githubusercontent.com/TWilhem/Presentation/refs/heads/main/Presentation/image/GoTUI.png?token=GHSAT0AAAAAADMRTO457H3ETEMTJPAYRA3A2IM2VQA)
 
 ---
 
 ## Fonctionnalités principales
 
-- **Exploration automatique** des plugins disponibles sur GitHub  
-  → Récupère la liste des fichiers du dépôt [`TWilhem/Plugin`](https://github.com/TWilhem/Plugin).
+- **Gestion automatique des dépôts**
+  → Lecture automatique d’un fichier `repo.conf` (JSON) dans le dossier de configuration.  
+  → Chaque dépôt listé dans ce fichier est interrogé pour charger ses fichiers disponibles (plugins `.so`, scripts, etc.).  
+  → Si aucun fichier `repo.conf` n’existe, GoTUI utilise par défaut le dépôt [`TWilhem/Plugin`](https://github.com/TWilhem/Plugin).
 
 - **Téléchargement & suppression** des plugins directement depuis l’interface.  
   → Les plugins sont stockés dans `~/.Plugin/Plugin`.
@@ -26,6 +30,9 @@ Elle permet de **gérer dynamiquement des plugins** destinés à simplifier le *
   - Panneau supérieur : liste des plugins
   - Panneau inférieur : logs d’activité
   - Panneau droit : exécution du TUI du plugin actif
+
+- **Barre de statut dynamique**
+  → Affiche en permanence les actions en cours, les sélections, ou le plugin actuellement exécuté.
 
 ---
 
@@ -60,6 +67,29 @@ source ~/.bashrc
 
 ---
 
+## Fichier `repo.conf` (optionnel)
+
+Tu peux définir plusieurs dépôts de plugins personnalisés :  
+Crée `~/.Plugin/repo.conf` avec par exemple :
+```json
+{
+  "repos": [
+    {
+      "name": "Plugins officiels",
+      "url": "https://api.github.com/repos/TWilhem/Plugin/contents/Plugin"
+    },
+    {
+      "name": "Plugins internes",
+      "url": "https://api.github.com/repos/MonOrganisation/Plugins/contents/"
+    }
+  ]
+}
+```
+
+Chaque URL doit pointer vers une **API GitHub** retournant une liste JSON de fichiers.
+
+---
+
 ## Utilisation
 
 ### Lancer GoTUI :
@@ -72,10 +102,10 @@ Pannel
 |:------:|:--------|
 | ↑ / ↓ | Naviguer dans la liste des plugins |
 | **Espace** | Sélectionner / désélectionner un plugin |
-| **Enter** | Télécharger ou supprimer les plugins sélectionnés |
+| **Enter** | Télécharger / supprimer les plugins sélectionnés ou ouverture / fermeture du dossier repo |
 | **e** | Exécuter le plugin sélectionné |
-| **Tab** | Changer de panneau |
 | **c** | Annuler la sélection |
+| **Tab** | Changer de panneau (plugins / logs / TUI plugin) |
 | **q** | Quitter GoTUI |
 
 ---
@@ -100,7 +130,8 @@ Cette commande :
 GoTUI/
 ├── main.go              # Code principal de l’application TUI
 ├── go.mod / go.sum      # Dépendances Go
-└── README.md            # Documentation
+├── README.md            # Documentation
+└── repo.conf            # Renseigne les depôts github
 ```
 
 ---
@@ -115,11 +146,11 @@ GoTUI/
 
 ## Exemple de fonctionnement
 
-1. Lancer `GoTUI`
-2. L’interface affiche les plugins disponibles sur GitHub.  
+1. Lancer `Pannel`
+2. Les dépôts listés dans `repo.conf` (ou celui par défaut) s’affichent.  
 3. Sélectionner un plugin avec **Espace**, puis valider avec **Enter** pour le télécharger.  
 4. Appuyer sur **e** pour exécuter le TUI embarqué du plugin directement dans GoTUI.  
-5. Les logs des opérations s’affichent en bas de l’écran.
+6. Suivre les logs dans le panneau inférieur
 
 ---
 
