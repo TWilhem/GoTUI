@@ -122,7 +122,7 @@ type model struct {
 	localFiles       map[string]bool
 	selected         map[string]bool // Clé: "repoIdx:fileIdx"
 	cmdTemplate      string          // Template du status
-	activePanel      int             // 0 = haut, 1 = bas, 2 = droite
+	activePanel      int             // 0 = Presentation, 1 = Install, 2 = Log, 3 = Pannel Droite
 	logs             []string        // Historique des logs
 	tuiOutput        []string        // Sortie du TUI en cours d'exécution
 	runningTUI       string          // Nom du fichier TUI en cours d'exécution
@@ -154,7 +154,7 @@ func initialModel(baseDir string) model {
 		cursor:       0,
 		localFiles:   make(map[string]bool),
 		selected:     make(map[string]bool),
-		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Selection: Espace | Replier/Déplier/Validé: Enter | Execution: e | Annuler: c | Quitter: q",
+		cmdTemplate:  "Navigation: ↑/↓ | Panel: Tab | Replier/Déplier/Selectionner: Espace | Validé: Enter | Execution: e | Annuler: c | Quitter: q",
 		activePanel:  0,
 		logs:         []string{},
 		tuiOutput:    []string{},
@@ -509,14 +509,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				// Replier/déplier le repository
 				line := m.displayLines[m.cursor]
-				if line.isHeader {
-					m.repos[line.repoIdx].Collapsed = !m.repos[line.repoIdx].Collapsed
-					m.buildDisplayLines()
-					// Ajuster le curseur si nécessaire
-					if m.cursor >= len(m.displayLines) {
-						m.cursor = len(m.displayLines) - 1
-					}
-				} else {
+				if !line.isHeader {
 					// Valider les opérations
 					if len(m.selected) > 0 {
 						m.processing = true
@@ -526,7 +519,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case " ":
-				// Sélectionner/désélectionner le fichier actuel
+				// Sélectionner/désélectionner ou Replier/déplier fichier/repositorie actuel
 				line := m.displayLines[m.cursor]
 				if !line.isHeader {
 					key := fmt.Sprintf("%d:%d", line.repoIdx, line.fileIdx)
@@ -534,6 +527,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						delete(m.selected, key)
 					} else {
 						m.selected[key] = true
+					}
+				} else if line.isHeader {
+					m.repos[line.repoIdx].Collapsed = !m.repos[line.repoIdx].Collapsed
+					m.buildDisplayLines()
+					// Ajuster le curseur si nécessaire
+					if m.cursor >= len(m.displayLines) {
+						m.cursor = len(m.displayLines) - 1
 					}
 				}
 			case "e":
@@ -690,13 +690,23 @@ func (m model) View() string {
 	availableHeight := m.height - 1
 
 	// Hauteur fixe pour chaque panel gauche
-	topHeight := int(float64(availableHeight) * 0.6)
+	topHeight := 0
 	bottomHeight := 0
 
 	// Hauteur du panel de droite
 	rightPanelHeight := 0
 
-	bottomHeight = availableHeight - topHeight - 4
+	if m.activePanel == 0 {
+		topHeight = int(float64(availableHeight) * 0.8)
+		bottomHeight = availableHeight - topHeight - 4
+	} else if m.activePanel == 1 {
+		topHeight = int(float64(availableHeight) * 0.4)
+		bottomHeight = availableHeight - topHeight - 4
+	} else if m.activePanel == 2 {
+		topHeight = int(float64(availableHeight) * 0.8)
+		bottomHeight = availableHeight - topHeight - 4
+	}
+
 	rightPanelHeight = availableHeight - 2
 
 	// Styles pour les panels gauches
@@ -766,18 +776,42 @@ func (m model) View() string {
 	repoHeaderStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("15"))
 
-	// === PANEL DU HAUT ===
-	var topContent strings.Builder
-	topContent.WriteString("Repositories disponible\n\n")
+	// === PANEL Installation ===
+	var PannelInstall strings.Builder
+	PannelInstall.WriteString("Repositories disponible\n\n")
 
 	if m.loading {
-		topContent.WriteString("Chargement des Repositories...\n\n")
+		PannelInstall.WriteString("Chargement des Repositories...\n\n")
 	} else if m.err != nil {
-		topContent.WriteString(fmt.Sprintf("❌ Erreur: %v\n\n", m.err))
+		PannelInstall.WriteString(fmt.Sprintf("❌ Erreur: %v\n\n", m.err))
 	} else if len(m.repos) == 0 {
-		topContent.WriteString("Aucun Repository trouvé\n\n")
+		PannelInstall.WriteString("Aucun Repository trouvé\n\n")
 	} else {
-		for i, line := range m.displayLines {
+		maxLengthWidht := leftPanelWidth - 6
+		maxLengthHeight := topHeight - 5
+
+		// Calculer la plage visible en fonction du curseur
+		startIdx := 0
+		endIdx := len(m.displayLines)
+
+		if len(m.displayLines) > maxLengthHeight {
+			// Centrer le curseur dans la vue visible
+			startIdx = m.cursor - maxLengthHeight/2
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			endIdx = startIdx + maxLengthHeight
+			if endIdx > len(m.displayLines) {
+				endIdx = len(m.displayLines)
+				startIdx = endIdx - maxLengthHeight
+				if startIdx < 0 {
+					startIdx = 0
+				}
+			}
+		}
+
+		for i := startIdx; i < endIdx; i++ {
+			line := m.displayLines[i]
 			if line.isHeader {
 				// Afficher le nom du repo avec indicateur de pliage
 				indicator := "▼"
@@ -785,12 +819,15 @@ func (m model) View() string {
 					indicator = "▶"
 				}
 				headerText := fmt.Sprintf("%s %s", indicator, line.text)
+				if len(headerText) > maxLengthWidht {
+					headerText = headerText[:maxLengthWidht-3] + "..."
+				}
 
 				if i == m.cursor && m.activePanel == 0 {
-					paddedLine := headerText + strings.Repeat(" ", leftPanelWidth-len(headerText)-4)
-					topContent.WriteString(selectedStyle.Render(paddedLine) + "\n")
+					paddedLine := headerText + strings.Repeat(" ", leftPanelWidth-len(headerText)-2)
+					PannelInstall.WriteString(selectedStyle.Render(paddedLine) + "\n")
 				} else {
-					topContent.WriteString(repoHeaderStyle.Render(headerText) + "\n")
+					PannelInstall.WriteString(repoHeaderStyle.Render(headerText) + "\n")
 				}
 			} else {
 				// Afficher un fichier
@@ -808,28 +845,31 @@ func (m model) View() string {
 
 				prefix := "  "
 				if file.Name == m.runningTUI {
-					prefix = "- "
+					prefix = "   - "
 				}
 
 				displayText := prefix + file.Name
+				if len(displayText) > maxLengthWidht {
+					displayText = displayText[:maxLengthWidht-3] + "..."
+				}
 
 				if i == m.cursor && m.activePanel == 0 {
 					selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
 					paddedLine := displayText + strings.Repeat(" ", leftPanelWidth-len(displayText)-4)
-					topContent.WriteString(selectedWithColor.Render(paddedLine) + "\n")
+					PannelInstall.WriteString(selectedWithColor.Render(paddedLine) + "\n")
 				} else {
-					topContent.WriteString(textStyle.Render(displayText) + "\n")
+					PannelInstall.WriteString(textStyle.Render(displayText) + "\n")
 				}
 			}
 		}
 	}
 
-	// === PANEL DU BAS - LOGS ===
-	var bottomContent strings.Builder
-	bottomContent.WriteString("Logs d'activité\n\n")
+	// === PANEL LOGS ===
+	var PannelLog strings.Builder
+	PannelLog.WriteString("Logs d'activité\n\n")
 
 	if len(m.logs) == 0 {
-		bottomContent.WriteString("Aucun log pour le moment...")
+		PannelLog.WriteString("Aucun log pour le moment...")
 	} else {
 		maxLogs := bottomHeight - 5
 		if maxLogs < 1 {
@@ -841,29 +881,29 @@ func (m model) View() string {
 			startIdx = len(m.logs) - maxLogs
 		}
 
-		maxLogWidth := leftPanelWidth - 6
+		maxLengthWidht := leftPanelWidth - 6
 
 		for i := len(m.logs) - 1; i >= startIdx; i-- {
 			log := m.logs[i]
-			if len(log) > maxLogWidth {
-				log = log[:maxLogWidth-3] + "..."
+			if len(log) > maxLengthWidht {
+				log = log[:maxLengthWidht-3] + "..."
 			}
-			bottomContent.WriteString(log + "\n")
+			PannelLog.WriteString(log + "\n")
 		}
 	}
 
 	// === PANEL DE DROITE - TUI OUTPUT ===
-	var rightContent strings.Builder
+	var PannelDroite strings.Builder
 	if m.embeddedTUI != nil {
 		// Afficher le TUI imbriqué
-		rightContent.WriteString(m.embeddedTUI.View())
+		PannelDroite.WriteString(m.embeddedTUI.View())
 	} else if m.activePanel == 1 {
 		if len(m.logs) != 0 {
 			maxLogs := 0
 			if m.scrollOffset == 0 {
 				maxLogs = rightPanelHeight - 3
 			} else {
-				maxLogs = rightPanelHeight - 5
+				maxLogs = rightPanelHeight - 7
 			}
 			if maxLogs < 1 {
 				maxLogs = 1
@@ -879,34 +919,34 @@ func (m model) View() string {
 				visibleEnd = len(m.logs)
 			}
 
-			maxLogWidth := rightPanelWidth - 6
+			maxLengthWidht := rightPanelWidth - 6
 
 			for i := visibleEnd - 1; i >= visibleStart; i-- {
 				log := m.logs[i]
-				if len(log) > maxLogWidth {
-					log = log[:maxLogWidth-3] + "..."
+				if len(log) > maxLengthWidht {
+					log = log[:maxLengthWidht-3] + "..."
 				}
-				rightContent.WriteString(log + "\n")
+				PannelDroite.WriteString(log + "\n")
 			}
 
 			// Indicateur visuel du scroll
 			if m.scrollOffset > 0 {
-				rightContent.WriteString(fmt.Sprintf("\n▲ %d log(s) précédents\n", m.scrollOffset))
+				PannelDroite.WriteString(fmt.Sprintf("\n▲ %d log(s) précédents\n", m.scrollOffset))
 			}
 		} else {
-			rightContent.WriteString("Aucun log à afficher...")
+			PannelDroite.WriteString("Aucun log à afficher...")
 		}
 
 	} else {
-		rightContent.WriteString("Exécution TUI\n\n")
-		rightContent.WriteString("Sélectionnez un fichier\n")
-		rightContent.WriteString("téléchargé et appuyez\n")
-		rightContent.WriteString("sur 'e' pour exécuter\n")
-		rightContent.WriteString("son TUI ici.\n\n")
-		rightContent.WriteString("Commandes:\n")
-		rightContent.WriteString("• e: Exécuter\n")
-		rightContent.WriteString("• s: Arrêter le TUI\n")
-		rightContent.WriteString("• Enter: Télécharger/Supprimer")
+		PannelDroite.WriteString("Exécution TUI\n\n")
+		PannelDroite.WriteString("Sélectionnez un fichier\n")
+		PannelDroite.WriteString("téléchargé et appuyez\n")
+		PannelDroite.WriteString("sur 'e' pour exécuter\n")
+		PannelDroite.WriteString("son TUI ici.\n\n")
+		PannelDroite.WriteString("Commandes:\n")
+		PannelDroite.WriteString("• e: Exécuter\n")
+		PannelDroite.WriteString("• s: Arrêter le TUI\n")
+		PannelDroite.WriteString("• Enter: Télécharger/Supprimer")
 	}
 
 	// Choisir les styles selon le panel actif
@@ -928,15 +968,15 @@ func (m model) View() string {
 	// Empiler les panels gauches
 	leftPanels := lipgloss.JoinVertical(
 		lipgloss.Left,
-		topStyle.Render(topContent.String()),
-		bottomStyle.Render(bottomContent.String()),
+		topStyle.Render(PannelInstall.String()),
+		bottomStyle.Render(PannelLog.String()),
 	)
 
 	// Joindre gauche et droite
 	allPanels := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		leftPanels,
-		rightStyle.Render(rightContent.String()),
+		rightStyle.Render(PannelDroite.String()),
 	)
 
 	panelsHeight := topHeight + bottomHeight + 5
