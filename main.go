@@ -448,7 +448,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	// Si plugin actif : PROPAGER TOUS les messages au plugin
-	if m.embeddedTUI != nil && m.activePanel == 2 {
+	if m.embeddedTUI != nil && m.activePanel == 3 {
 		// Propager d'abord
 		newModel, c := m.embeddedTUI.Update(msg)
 		m.embeddedTUI = newModel
@@ -468,7 +468,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.embeddedTUI = nil
 				m.embeddedPluginID = ""
 				m.runningTUI = ""
-				m.activePanel = 0
+				m.activePanel = 1
 				// ne pas propager plus loin
 				return m, nil
 			}
@@ -488,15 +488,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Changer de panel avec Tab
 		if msg.String() == "tab" && !m.loading && !m.processing {
 			if m.embeddedTUI != nil {
-				m.activePanel = (m.activePanel + 1) % 3
+				m.activePanel = (m.activePanel + 1) % 4
 			} else {
-				m.activePanel = (m.activePanel + 1) % 2
+				m.activePanel = (m.activePanel + 1) % 3
 			}
 			m.scrollOffset = 0
 		}
 
-		// Navigation avec les flèches (seulement dans le panel du haut)
-		if !m.loading && !m.processing && len(m.displayLines) > 0 && m.activePanel == 0 {
+		// Navigation avec les flèches (Pannel Installation)
+		if !m.loading && !m.processing && len(m.displayLines) > 0 && m.activePanel == 1 {
 			switch msg.String() {
 			case "up", "k":
 				if m.cursor > 0 {
@@ -544,7 +544,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.localFiles[file.Name] {
 						m.runningTUI = file.Name
 						m.addLog(fmt.Sprintf("▶️ Chargement de %s", file.Name))
-						m.activePanel = 2
+						m.activePanel = 3
 						return m, loadPlugin(file.Name, m.pluginDir)
 					} else {
 						m.addLog(fmt.Sprintf("⚠️ %s n'est pas téléchargé", file.Name))
@@ -556,21 +556,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// === Scroll du panneau de logs (panel 1) ===
-		if m.activePanel == 1 && len(m.logs) > 0 {
+		// === Scroll du panneau de logs (panel 2) ===
+		if m.activePanel == 2 && len(m.logs) > 0 {
 			switch msg.String() {
 			case "up", "k":
 				if m.scrollOffset > 0 {
 					m.scrollOffset--
 				}
 			case "down", "j":
-				if m.scrollOffset < len(m.logs)-57 {
+				if m.scrollOffset < len(m.logs)-(m.height-8) {
 					m.scrollOffset++
 				}
 			case "ctrl+up": // aller tout en haut
 				m.scrollOffset = 0
 			case "ctrl+down": // aller tout en bas
-				m.scrollOffset = len(m.logs) - 57
+				m.scrollOffset = len(m.logs) - (m.height - 8)
 			}
 		}
 
@@ -690,53 +690,71 @@ func (m model) View() string {
 	availableHeight := m.height - 1
 
 	// Hauteur fixe pour chaque panel gauche
-	topHeight := 0
-	bottomHeight := 0
+	PresentHeight := 1
+	InstallHeight := 0
+	LogHeight := 0
 
 	// Hauteur du panel de droite
 	rightPanelHeight := 0
 
 	if m.activePanel == 0 {
-		topHeight = int(float64(availableHeight) * 0.8)
-		bottomHeight = availableHeight - topHeight - 4
+		InstallHeight = int(float64(availableHeight) * 0.4)
+		LogHeight = availableHeight - PresentHeight - InstallHeight - 6
 	} else if m.activePanel == 1 {
-		topHeight = int(float64(availableHeight) * 0.4)
-		bottomHeight = availableHeight - topHeight - 4
+		InstallHeight = int(float64(availableHeight) * 0.8)
+		LogHeight = availableHeight - PresentHeight - InstallHeight - 6
 	} else if m.activePanel == 2 {
-		topHeight = int(float64(availableHeight) * 0.8)
-		bottomHeight = availableHeight - topHeight - 4
+		InstallHeight = int(float64(availableHeight) * 0.4)
+		LogHeight = availableHeight - PresentHeight - InstallHeight - 6
+	} else if m.activePanel == 3 {
+		InstallHeight = int(float64(availableHeight) * 0.8)
+		LogHeight = availableHeight - PresentHeight - InstallHeight - 6
 	}
 
 	rightPanelHeight = availableHeight - 2
 
 	// Styles pour les panels gauches
-	topBoxStyle := lipgloss.NewStyle().
+	PresentBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("86")).
+		Padding(0, 2).
+		Width(leftPanelWidth).
+		Height(PresentHeight)
+
+	PresentBoxInactiveStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 2).
+		Width(leftPanelWidth).
+		Height(PresentHeight)
+
+	InstallBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("86")).
 		Padding(1, 2).
 		Width(leftPanelWidth).
-		Height(topHeight)
+		Height(InstallHeight)
 
-	topBoxInactiveStyle := lipgloss.NewStyle().
+	InstallBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(1, 2).
 		Width(leftPanelWidth).
-		Height(topHeight)
+		Height(InstallHeight)
 
-	bottomBoxStyle := lipgloss.NewStyle().
+	LogBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("86")).
 		Padding(1, 2).
 		Width(leftPanelWidth).
-		Height(bottomHeight)
+		Height(LogHeight)
 
-	bottomBoxInactiveStyle := lipgloss.NewStyle().
+	LogBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(1, 2).
 		Width(leftPanelWidth).
-		Height(bottomHeight)
+		Height(LogHeight)
 
 	// Style pour le panel de droite
 	rightBoxStyle := lipgloss.NewStyle().
@@ -776,7 +794,11 @@ func (m model) View() string {
 	repoHeaderStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("15"))
 
-	// === PANEL Installation ===
+	// === PANEL GAUCHE - Presentation ===
+	var PannelPresent strings.Builder
+	PannelPresent.WriteString("Plugin")
+
+	// === PANEL GAUCHE - Installation ===
 	var PannelInstall strings.Builder
 	PannelInstall.WriteString("Repositories disponible\n\n")
 
@@ -788,7 +810,7 @@ func (m model) View() string {
 		PannelInstall.WriteString("Aucun Repository trouvé\n\n")
 	} else {
 		maxLengthWidht := leftPanelWidth - 6
-		maxLengthHeight := topHeight - 5
+		maxLengthHeight := InstallHeight - 5
 
 		// Calculer la plage visible en fonction du curseur
 		startIdx := 0
@@ -823,7 +845,7 @@ func (m model) View() string {
 					headerText = headerText[:maxLengthWidht-3] + "..."
 				}
 
-				if i == m.cursor && m.activePanel == 0 {
+				if i == m.cursor && m.activePanel == 1 {
 					paddedLine := headerText + strings.Repeat(" ", leftPanelWidth-len(headerText)-2)
 					PannelInstall.WriteString(selectedStyle.Render(paddedLine) + "\n")
 				} else {
@@ -853,7 +875,7 @@ func (m model) View() string {
 					displayText = displayText[:maxLengthWidht-3] + "..."
 				}
 
-				if i == m.cursor && m.activePanel == 0 {
+				if i == m.cursor && m.activePanel == 1 {
 					selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
 					paddedLine := displayText + strings.Repeat(" ", leftPanelWidth-len(displayText)-4)
 					PannelInstall.WriteString(selectedWithColor.Render(paddedLine) + "\n")
@@ -864,14 +886,14 @@ func (m model) View() string {
 		}
 	}
 
-	// === PANEL LOGS ===
+	// === PANEL GAUCHE - LOGS ===
 	var PannelLog strings.Builder
 	PannelLog.WriteString("Logs d'activité\n\n")
 
 	if len(m.logs) == 0 {
 		PannelLog.WriteString("Aucun log pour le moment...")
 	} else {
-		maxLogs := bottomHeight - 5
+		maxLogs := LogHeight - 5
 		if maxLogs < 1 {
 			maxLogs = 1
 		}
@@ -897,13 +919,13 @@ func (m model) View() string {
 	if m.embeddedTUI != nil {
 		// Afficher le TUI imbriqué
 		PannelDroite.WriteString(m.embeddedTUI.View())
-	} else if m.activePanel == 1 {
+	} else if m.activePanel == 2 {
 		if len(m.logs) != 0 {
 			maxLogs := 0
 			if m.scrollOffset == 0 {
 				maxLogs = rightPanelHeight - 3
 			} else {
-				maxLogs = rightPanelHeight - 7
+				maxLogs = rightPanelHeight - 5
 			}
 			if maxLogs < 1 {
 				maxLogs = 1
@@ -937,7 +959,7 @@ func (m model) View() string {
 			PannelDroite.WriteString("Aucun log à afficher...")
 		}
 
-	} else {
+	} else if m.activePanel == 1 {
 		PannelDroite.WriteString("Exécution TUI\n\n")
 		PannelDroite.WriteString("Sélectionnez un fichier\n")
 		PannelDroite.WriteString("téléchargé et appuyez\n")
@@ -947,39 +969,66 @@ func (m model) View() string {
 		PannelDroite.WriteString("• e: Exécuter\n")
 		PannelDroite.WriteString("• s: Arrêter le TUI\n")
 		PannelDroite.WriteString("• Enter: Télécharger/Supprimer")
+	} else if m.activePanel == 0 {
+		NomPlugin := `
+ ____  _             _       
+|  _ \| |_   _  __ _(_)_ __  
+| |_) | | | | |/ _` + "`" + ` | | '_ \ 
+|  __/| | |_| | (_| | | | | |
+|_|   |_|\__,_|\__, |_|_| |_|
+               |___/
+`
+
+		PannelDroite.WriteString(NomPlugin + "\n\n")
+		PannelDroite.WriteString("Copyright 2025 Tom Wilhem\n\n")
+		PannelDroite.WriteString("Configuration Repository:\n")
+		PannelDroite.WriteString("https://github.com/TWilhem/GoTUI/blob/main/README.md\n\n")
+		PannelDroite.WriteString("Raise an Issue for the Pannel:\n")
+		PannelDroite.WriteString("https://github.com/TWilhem/GoTUI/issues\n\n")
+		PannelDroite.WriteString("Raise an Issue for the Plugin:\n")
+		PannelDroite.WriteString("https://github.com/TWilhem/Plugin/issues\n\n")
 	}
 
 	// Choisir les styles selon le panel actif
-	var topStyle, bottomStyle, rightStyle lipgloss.Style
+	var PannelPresentStyle, PannelInstallStyle, PannelLogStyle, PannelRightStyle lipgloss.Style
 	if m.activePanel == 0 {
-		topStyle = topBoxStyle
-		bottomStyle = bottomBoxInactiveStyle
-		rightStyle = rightBoxInactiveStyle
+		PannelPresentStyle = PresentBoxStyle
+		PannelInstallStyle = InstallBoxInactiveStyle
+		PannelLogStyle = LogBoxInactiveStyle
+		PannelRightStyle = rightBoxInactiveStyle
 	} else if m.activePanel == 1 {
-		topStyle = topBoxInactiveStyle
-		bottomStyle = bottomBoxStyle
-		rightStyle = rightBoxInactiveStyle
+		PannelPresentStyle = PresentBoxInactiveStyle
+		PannelInstallStyle = InstallBoxStyle
+		PannelLogStyle = LogBoxInactiveStyle
+		PannelRightStyle = rightBoxInactiveStyle
 	} else if m.activePanel == 2 {
-		topStyle = topBoxInactiveStyle
-		bottomStyle = bottomBoxInactiveStyle
-		rightStyle = rightBoxStyle
+		PannelPresentStyle = PresentBoxInactiveStyle
+		PannelInstallStyle = InstallBoxInactiveStyle
+		PannelLogStyle = LogBoxStyle
+		PannelRightStyle = rightBoxInactiveStyle
+	} else if m.activePanel == 3 {
+		PannelPresentStyle = PresentBoxInactiveStyle
+		PannelInstallStyle = InstallBoxInactiveStyle
+		PannelLogStyle = LogBoxInactiveStyle
+		PannelRightStyle = rightBoxStyle
 	}
 
 	// Empiler les panels gauches
 	leftPanels := lipgloss.JoinVertical(
 		lipgloss.Left,
-		topStyle.Render(PannelInstall.String()),
-		bottomStyle.Render(PannelLog.String()),
+		PannelPresentStyle.Render(PannelPresent.String()),
+		PannelInstallStyle.Render(PannelInstall.String()),
+		PannelLogStyle.Render(PannelLog.String()),
 	)
 
 	// Joindre gauche et droite
 	allPanels := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		leftPanels,
-		rightStyle.Render(PannelDroite.String()),
+		PannelRightStyle.Render(PannelDroite.String()),
 	)
 
-	panelsHeight := topHeight + bottomHeight + 5
+	panelsHeight := PresentHeight + InstallHeight + LogHeight + 7
 	spacerHeight := availableHeight - panelsHeight
 	if spacerHeight < 0 {
 		spacerHeight = 0
