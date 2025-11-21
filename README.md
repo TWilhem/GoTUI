@@ -3,7 +3,7 @@
 **GoTUI** est une interface **TUI (Text-based User Interface)** écrite en **Go** utilisant le framework [Bubbletea](https://github.com/charmbracelet/bubbletea) et [Lipgloss](https://github.com/charmbracelet/lipgloss).  
 Elle permet de **gérer dynamiquement des plugins Go** (.so) à partir de dépôts GitHub ou de sources locales, tout en offrant un environnement ergonomique et interactif directement dans le terminal **Linux/Debian**.
 
-![TUI](https://raw.githubusercontent.com/TWilhem/Presentation/refs/heads/main/Presentation/image/GoTUI.png?token=GHSAT0AAAAAADMRTO457H3ETEMTJPAYRA3A2IM2VQA)
+![TUI](http://twilhem.github.io/Presentation/Presentation/image/GoTUI.png)
 
 ---
 
