@@ -443,6 +443,32 @@ func removeAliasFromPluginBashrc(filename, pluginDir string) error {
 	return os.WriteFile(pluginFile, []byte(strings.Join(newLines, "\n")), 0644)
 }
 
+func TitledBorder(activePanel string, title string, width int) lipgloss.Border {
+
+	NameInterface := ""
+	if title != "" {
+		NameInterface = " " + title + " "
+	}
+
+	return lipgloss.Border{
+		Top:         "─" + "[" + activePanel + "]" + "─" + NameInterface + strings.Repeat("─", max(0, width-len(title)-4)),
+		Bottom:      strings.Repeat("─", width-2),
+		Left:        "│",
+		Right:       "│",
+		TopLeft:     "╭",
+		TopRight:    "╮",
+		BottomLeft:  "╰",
+		BottomRight: "╯",
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // Gestion des événements
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -490,9 +516,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.embeddedTUI != nil {
 				m.activePanel = (m.activePanel + 1) % 4
 			} else {
-				m.activePanel = (m.activePanel + 1) % 3
+				m.activePanel = (m.activePanel % 2) + 1
+
 			}
 			m.scrollOffset = 0
+		}
+
+		// Changement de panel
+		switch msg.String() {
+		case "0":
+			m.activePanel = 0
+			return m, nil
+		case "1":
+			m.activePanel = 1
+			return m, nil
+		case "2":
+			m.activePanel = 2
+			return m, nil
 		}
 
 		// Navigation avec les flèches (Pannel Installation)
@@ -507,7 +547,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 			case "enter":
-				// Replier/déplier le repository
+				// Valider la selection
 				line := m.displayLines[m.cursor]
 				if !line.isHeader {
 					// Valider les opérations
@@ -637,6 +677,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.runningTUI = ""
 				}
 			}
+			return m, tea.Tick(time.Second*3, func(t time.Time) tea.Msg {
+				return tickMsg(t)
+			})
 		}
 
 	case allOperationsCompleteMsg:
@@ -681,6 +724,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Affichage
 func (m model) View() string {
+	// Vérifier la taille minimale de la fenêtre
+	const minWidth = 71
+	const minHeight = 37
+
+	if m.width < minWidth || m.height < minHeight {
+		// Message d'avertissement stylisé
+		warningStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("11")).
+			Bold(true).
+			Padding(1, 2)
+
+		message := fmt.Sprintf(
+			"⚠️  Fenêtre trop petite\n\n"+
+				"Taille actuelle : %dx%d\n"+
+				"Taille minimale : %dx%d\n\n"+
+				"Veuillez agrandir votre terminal.",
+			m.width, m.height, minWidth, minHeight,
+		)
+
+		return warningStyle.Render(message)
+	}
+
 	// Largeur pour les panels gauches
 	leftPanelWidth := 35
 	// Largeur pour le panel droit (TUI)
@@ -715,44 +780,40 @@ func (m model) View() string {
 
 	// Styles pour les panels gauches
 	PresentBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("0", "", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("86")).
 		Padding(0, 2).
 		Width(leftPanelWidth).
 		Height(PresentHeight)
 
 	PresentBoxInactiveStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("0", "", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 2).
 		Width(leftPanelWidth).
 		Height(PresentHeight)
 
 	InstallBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("1", "Repositories", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("86")).
-		Padding(1, 2).
 		Width(leftPanelWidth).
 		Height(InstallHeight)
 
 	InstallBoxInactiveStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("1", "Repositories", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("240")).
-		Padding(1, 2).
 		Width(leftPanelWidth).
 		Height(InstallHeight)
 
 	LogBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("2", "Log", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("86")).
-		Padding(1, 2).
 		Width(leftPanelWidth).
 		Height(LogHeight)
 
 	LogBoxInactiveStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(TitledBorder("2", "Log", leftPanelWidth)).
 		BorderForeground(lipgloss.Color("240")).
-		Padding(1, 2).
 		Width(leftPanelWidth).
 		Height(LogHeight)
 
@@ -760,20 +821,18 @@ func (m model) View() string {
 	rightBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("86")).
-		Padding(1, 2).
 		Width(rightPanelWidth).
 		Height(rightPanelHeight)
 
 	rightBoxInactiveStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
-		Padding(1, 2).
 		Width(rightPanelWidth).
 		Height(rightPanelHeight)
 
 	// Style de la barre de statut
 	statusStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
+		Foreground(lipgloss.Color("15")).
 		Width(m.width - 2).
 		Align(lipgloss.Left)
 
@@ -800,17 +859,16 @@ func (m model) View() string {
 
 	// === PANEL GAUCHE - Installation ===
 	var PannelInstall strings.Builder
-	PannelInstall.WriteString("Repositories disponible\n\n")
 
 	if m.loading {
-		PannelInstall.WriteString("Chargement des Repositories...\n\n")
+		PannelInstall.WriteString("\n  Chargement des Repositories...\n\n")
 	} else if m.err != nil {
 		PannelInstall.WriteString(fmt.Sprintf("❌ Erreur: %v\n\n", m.err))
 	} else if len(m.repos) == 0 {
-		PannelInstall.WriteString("Aucun Repository trouvé\n\n")
+		PannelInstall.WriteString("\n  Aucun Repository trouvé\n\n")
 	} else {
 		maxLengthWidht := leftPanelWidth - 6
-		maxLengthHeight := InstallHeight - 5
+		maxLengthHeight := InstallHeight - 0
 
 		// Calculer la plage visible en fonction du curseur
 		startIdx := 0
@@ -834,6 +892,14 @@ func (m model) View() string {
 
 		for i := startIdx; i < endIdx; i++ {
 			line := m.displayLines[i]
+
+			// Calcule du dernier /n
+			isLastLine := i == endIdx-1
+			newline := ""
+			if !isLastLine {
+				newline = "\n"
+			}
+
 			if line.isHeader {
 				// Afficher le nom du repo avec indicateur de pliage
 				indicator := "▼"
@@ -847,9 +913,9 @@ func (m model) View() string {
 
 				if i == m.cursor && m.activePanel == 1 {
 					paddedLine := headerText + strings.Repeat(" ", leftPanelWidth-len(headerText)-2)
-					PannelInstall.WriteString(selectedStyle.Render(paddedLine) + "\n")
+					PannelInstall.WriteString(selectedStyle.Render(paddedLine) + newline)
 				} else {
-					PannelInstall.WriteString(repoHeaderStyle.Render(headerText) + "\n")
+					PannelInstall.WriteString(repoHeaderStyle.Render(headerText) + newline)
 				}
 			} else {
 				// Afficher un fichier
@@ -867,7 +933,7 @@ func (m model) View() string {
 
 				prefix := "  "
 				if file.Name == m.runningTUI {
-					prefix = "   - "
+					prefix = "   → "
 				}
 
 				displayText := prefix + file.Name
@@ -878,9 +944,9 @@ func (m model) View() string {
 				if i == m.cursor && m.activePanel == 1 {
 					selectedWithColor := selectedStyle.Foreground(textStyle.GetForeground())
 					paddedLine := displayText + strings.Repeat(" ", leftPanelWidth-len(displayText)-4)
-					PannelInstall.WriteString(selectedWithColor.Render(paddedLine) + "\n")
+					PannelInstall.WriteString(selectedWithColor.Render(paddedLine) + newline)
 				} else {
-					PannelInstall.WriteString(textStyle.Render(displayText) + "\n")
+					PannelInstall.WriteString(textStyle.Render(displayText) + newline)
 				}
 			}
 		}
@@ -888,12 +954,11 @@ func (m model) View() string {
 
 	// === PANEL GAUCHE - LOGS ===
 	var PannelLog strings.Builder
-	PannelLog.WriteString("Logs d'activité\n\n")
 
 	if len(m.logs) == 0 {
-		PannelLog.WriteString("Aucun log pour le moment...")
+		PannelLog.WriteString("\n  Aucun log pour le moment...")
 	} else {
-		maxLogs := LogHeight - 5
+		maxLogs := LogHeight - 0
 		if maxLogs < 1 {
 			maxLogs = 1
 		}
@@ -903,14 +968,22 @@ func (m model) View() string {
 			startIdx = len(m.logs) - maxLogs
 		}
 
-		maxLengthWidht := leftPanelWidth - 6
+		maxLengthWidht := leftPanelWidth - 0
 
 		for i := len(m.logs) - 1; i >= startIdx; i-- {
+
+			// Calcule du dernier /n
+			isLastLine := i == startIdx
+			newline := ""
+			if !isLastLine {
+				newline = "\n"
+			}
+
 			log := m.logs[i]
 			if len(log) > maxLengthWidht {
 				log = log[:maxLengthWidht-3] + "..."
 			}
-			PannelLog.WriteString(log + "\n")
+			PannelLog.WriteString(log + newline)
 		}
 	}
 
@@ -941,7 +1014,7 @@ func (m model) View() string {
 				visibleEnd = len(m.logs)
 			}
 
-			maxLengthWidht := rightPanelWidth - 6
+			maxLengthWidht := rightPanelWidth - 0
 
 			for i := visibleEnd - 1; i >= visibleStart; i-- {
 				log := m.logs[i]
@@ -956,37 +1029,36 @@ func (m model) View() string {
 				PannelDroite.WriteString(fmt.Sprintf("\n▲ %d log(s) précédents\n", m.scrollOffset))
 			}
 		} else {
-			PannelDroite.WriteString("Aucun log à afficher...")
+			PannelDroite.WriteString("\n  Aucun log à afficher...")
 		}
 
 	} else if m.activePanel == 1 {
-		PannelDroite.WriteString("Exécution TUI\n\n")
-		PannelDroite.WriteString("Sélectionnez un fichier\n")
-		PannelDroite.WriteString("téléchargé et appuyez\n")
-		PannelDroite.WriteString("sur 'e' pour exécuter\n")
-		PannelDroite.WriteString("son TUI ici.\n\n")
-		PannelDroite.WriteString("Commandes:\n")
-		PannelDroite.WriteString("• e: Exécuter\n")
-		PannelDroite.WriteString("• s: Arrêter le TUI\n")
-		PannelDroite.WriteString("• Enter: Télécharger/Supprimer")
+		PannelDroite.WriteString("\n  Exécution TUI\n\n")
+		PannelDroite.WriteString("  Sélectionnez un fichier\n")
+		PannelDroite.WriteString("  téléchargé et appuyez\n")
+		PannelDroite.WriteString("  sur 'e' pour exécuter\n")
+		PannelDroite.WriteString("  son TUI ici.\n\n")
+		PannelDroite.WriteString("  Commandes:\n")
+		PannelDroite.WriteString("  • e: Exécuter\n")
+		PannelDroite.WriteString("  • s: Arrêter le TUI\n")
+		PannelDroite.WriteString("  • Enter: Télécharger/Supprimer")
 	} else if m.activePanel == 0 {
 		NomPlugin := `
- ____  _             _       
-|  _ \| |_   _  __ _(_)_ __  
-| |_) | | | | |/ _` + "`" + ` | | '_ \ 
-|  __/| | |_| | (_| | | | | |
-|_|   |_|\__,_|\__, |_|_| |_|
-               |___/
+    ____     _____ _   _ ___ 
+   / ___| __|_   _| | | |_ _|
+  | |  _ / _ \| | | | | || | 
+  | |_| | (_) | | | |_| || | 
+   \____|\___/|_|  \___/|___|
 `
 
 		PannelDroite.WriteString(NomPlugin + "\n\n")
-		PannelDroite.WriteString("Copyright 2025 Tom Wilhem\n\n")
-		PannelDroite.WriteString("Configuration Repository:\n")
-		PannelDroite.WriteString("https://github.com/TWilhem/GoTUI/blob/main/README.md\n\n")
-		PannelDroite.WriteString("Raise an Issue for the Pannel:\n")
-		PannelDroite.WriteString("https://github.com/TWilhem/GoTUI/issues\n\n")
-		PannelDroite.WriteString("Raise an Issue for the Plugin:\n")
-		PannelDroite.WriteString("https://github.com/TWilhem/Plugin/issues\n\n")
+		PannelDroite.WriteString("  Copyright 2025 Tom Wilhem\n\n")
+		PannelDroite.WriteString("  Configuration Repository:\n")
+		PannelDroite.WriteString("  https://github.com/TWilhem/GoTUI/blob/main/README.md\n\n")
+		PannelDroite.WriteString("  Raise an Issue for the Pannel:\n")
+		PannelDroite.WriteString("  https://github.com/TWilhem/GoTUI/issues\n\n")
+		PannelDroite.WriteString("  Raise an Issue for the Plugin:\n")
+		PannelDroite.WriteString("  https://github.com/TWilhem/Plugin/issues\n\n")
 	}
 
 	// Choisir les styles selon le panel actif
